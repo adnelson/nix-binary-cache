@@ -1,0 +1,4 @@
+.nix-shell-pids
+dist
+*.hi
+.bin
