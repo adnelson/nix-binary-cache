@@ -14,6 +14,7 @@ let
     "bytestring"
     "classy-prelude"
     "directory"
+    "http-client"
     "http-media"
     "http-types"
     "mtl"
@@ -107,7 +108,7 @@ let
     -- It is not meant to be modified by hand.
     name:                ${pname}
     version:             ${version}
-    license:             mit
+    license:             MIT
     license-file:        LICENSE
     author:              Allen Nelson
     maintainer:          ithinkican@gmail.com
