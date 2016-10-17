@@ -45,6 +45,7 @@ let
     "GADTs"
     "GeneralizedNewtypeDeriving"
     "LambdaCase"
+    "MultiParamTypeClasses"
     "NoImplicitPrelude"
     "OverloadedStrings"
     "QuasiQuotes"
@@ -70,6 +71,7 @@ let
 
   inherit (builtins) compareVersions;
   inherit (pkgs.lib) filter concatStringsSep isDerivation optional;
+  joinLines = builtins.concatStringsSep "\n";
   joinCommas = builtins.concatStringsSep ", ";
   joinSpaces = builtins.concatStringsSep " ";
 
@@ -101,6 +103,18 @@ let
   cpp-options = optional
     (compareVersions haskellPackages.servant.version "0.7" < 0)
     "-DOLD_SERVANT";
+
+  # .ghci file text.
+  dotGhci = pkgs.writeText "${pname}.ghci" (joinLines (
+    map (ext: ":set -X${ext}") extensions ++
+    [
+      ":set prompt \"\\ESC[34mλ> \\ESC[m\""
+      "import Data.Text (Text)"
+      "import qualified Data.Text as T"
+      "import qualified Data.Text.Encoding as T"
+      ""
+    ]
+  ));
 
   # Cabal file text.
   cabalFile = pkgs.writeText "${pname}.cabal" ''
@@ -183,6 +197,7 @@ haskellPackages.mkDerivation rec {
 
     # Make sure we're in the project directory, and do initialization.
     if [[ -e project.nix ]] && grep -q ${pname} project.nix; then
+      cp -f ${dotGhci} .ghci
       eval "${preConfigure}"
       cabal configure --enable-tests
     fi
