@@ -15,6 +15,7 @@ let
     "classy-prelude"
     "directory"
     "http-client"
+    "http-client-tls"
     "http-media"
     "http-types"
     "mtl"

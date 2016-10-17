@@ -9,7 +9,7 @@ import Control.Monad.Trans.Except (ExceptT)
 
 import Nix.Cache.Types (NixCacheInfo(..))
 
-type NixCacheAPI = "nix-cache-info" :> Get '[JSON, OctetStream] NixCacheInfo
+type NixCacheAPI = "nix-cache-info" :> Get '[OctetStream, JSON] NixCacheInfo
 
 -- | Define the client by pattern matching.
 nixCacheInfo :: Manager -> BaseUrl -> ExceptT ServantError IO NixCacheInfo
@@ -17,4 +17,9 @@ nixCacheInfo = client (Proxy :: Proxy NixCacheAPI)
 
 -- | Base URL of the nixos cache.
 nixosCacheUrl :: BaseUrl
-nixosCacheUrl = BaseUrl Http "cache.nixos.org" 80 ""
+nixosCacheUrl = BaseUrl {
+  baseUrlScheme = Http,
+  baseUrlHost = "cache.nixos.org",
+  baseUrlPort = 80,
+  baseUrlPath = ""
+  }
