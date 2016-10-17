@@ -45,6 +45,7 @@ let
     "GADTs"
     "GeneralizedNewtypeDeriving"
     "LambdaCase"
+    "MultiParamTypeClasses"
     "NoImplicitPrelude"
     "OverloadedStrings"
     "QuasiQuotes"

@@ -3,11 +3,12 @@ module Nix.Cache.Client where
 import ClassyPrelude
 import Data.Aeson
 import Data.Proxy
-import GHC.Generics
 import Network.HTTP.Client (Manager, newManager, defaultManagerSettings)
 import Servant.API
 import Servant.Client
 import Control.Monad.Trans.Except (ExceptT, runExceptT)
+
+-- import Nix.Cache.Types
 
 data Position = Position
   { x :: Int
@@ -39,9 +40,12 @@ data Email = Email
 
 instance FromJSON Email
 
-type API = "position" :> Capture "x" Int :> Capture "y" Int :> Get '[JSON] Position
+type API = "fart" :> Get '[JSON] Int
+      :<|> "position" :> Capture "x" Int :> Capture "y" Int :> Get '[JSON] Position
       :<|> "hello" :> QueryParam "name" String :> Get '[JSON] HelloMessage
       :<|> "marketing" :> ReqBody '[JSON] ClientInfo :> Post '[JSON] Email
+
+fart :: Manager -> BaseUrl -> ExceptT ServantError IO Int
 
 position :: Int -- ^ value for "x"
          -> Int -- ^ value for "y"
@@ -60,7 +64,7 @@ marketing :: ClientInfo -- ^ value for the request body
           -> ExceptT ServantError IO Email
 
 
-position :<|> hello :<|> marketing = client (Proxy :: Proxy API)
+fart :<|> position :<|> hello :<|> marketing = client (Proxy :: Proxy API)
 
 queries :: Manager -> BaseUrl -> ExceptT ServantError IO (Position, HelloMessage, Email)
 queries manager baseurl = do
