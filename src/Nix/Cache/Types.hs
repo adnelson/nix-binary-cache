@@ -6,7 +6,7 @@ import qualified Data.HashMap.Strict as H
 import qualified Data.Text as T
 import Data.Attoparsec.ByteString.Char8 (char, notChar, space, endOfLine,
                                          many1)
-import Data.Attoparsec.ByteString.Lazy (Result(..), Parser, parse, string)
+import Data.Attoparsec.ByteString.Lazy (Result(..), Parser, parse)
 import Data.Aeson (ToJSON, FromJSON)
 import Servant (MimeUnrender(..), OctetStream)
 
@@ -33,7 +33,7 @@ data NixCacheInfo = NixCacheInfo {
   storeDir :: FilePath,
   -- ^ On-disk location of the nix store.
   wantMassQuery :: Bool,
-  -- ^ Not sure what this does
+  -- ^ Not sure what this does.
   priority :: Maybe Int
   -- ^ Also not sure what this means.
   } deriving (Show, Eq, Generic)
@@ -41,20 +41,19 @@ data NixCacheInfo = NixCacheInfo {
 instance ToJSON NixCacheInfo
 instance FromJSON NixCacheInfo
 
+-- | Translate a KVMap into a NixCacheInfo. This operation could fail.
 kvMapToNixCacheInfo :: KVMap -> Either String NixCacheInfo
 kvMapToNixCacheInfo (KVMap kvm) = case lookup "StoreDir" kvm of
   Nothing -> Left "No StoreDir key defined."
-  Just sdir -> do
-    let wantMassQuery = lookup "WantMassQuery" kvm == Just "1"
-        priority = lookup "Priority" kvm >>= readMay
-    return $ NixCacheInfo (T.unpack sdir) wantMassQuery priority
+  Just sdir -> return $ NixCacheInfo {
+    storeDir = T.unpack sdir,
+    wantMassQuery = lookup "WantMassQuery" kvm == Just "1",
+    priority = lookup "Priority" kvm >>= readMay
+    }
 
-parseNixCacheInfo :: Parser NixCacheInfo
-parseNixCacheInfo = do
-  string "StoreDir: "
-  storeDir_ <- many $ notChar '\n'
-  return $ NixCacheInfo storeDir_ False Nothing
-
+-- | To parse NixCacheInfo from an octet stream, first parse the
+-- stream as a KVMap and then attempt to translate it into a
+-- NixCacheInfo.
 instance MimeUnrender OctetStream NixCacheInfo where
   mimeUnrender _ bstring = case parse parseKVMap bstring of
     Done _ kvmap -> kvMapToNixCacheInfo kvmap
