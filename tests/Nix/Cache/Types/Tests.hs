@@ -1,4 +1,5 @@
-module Nix.Tests.Cache.Client where
+-- | Tests related to the base types that support the nix cache.
+module Nix.Cache.Types.Tests where
 
 import ClassyPrelude hiding (ByteString)
 import Data.Attoparsec.ByteString.Lazy (Result(..), parse)

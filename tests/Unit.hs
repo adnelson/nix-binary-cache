@@ -8,7 +8,7 @@ import Control.Monad.Trans.Except (runExceptT)
 import Servant.Client
 
 import Nix.Cache.Client
-import Nix.Tests.Cache.Client
+import qualified Nix.Cache.Types.Tests as TypesTests
 
 run :: BaseUrl -> IO ()
 run baseUrl = do
@@ -21,5 +21,5 @@ run baseUrl = do
 
 main :: IO()
 main = hspec $ do
-  nixCacheInfoSpec
-  kvMapSpec
+  TypesTests.nixCacheInfoSpec
+  TypesTests.kvMapSpec
