@@ -1,12 +1,27 @@
 module Nix.Tests.Cache.Client where
 
 import ClassyPrelude hiding (ByteString)
+import Data.Attoparsec.ByteString.Lazy (Result(..), parse)
 import Data.ByteString.Lazy (ByteString)
+import qualified Data.HashMap.Strict as H
 import Data.Either (isLeft)
 import Test.Hspec (Spec, describe, it, shouldBe, shouldSatisfy)
 import Servant
 
 import Nix.Cache.Types
+
+kvMapSpec :: Spec
+kvMapSpec = describe "KVMap" $ do
+  describe "parsing" $ do
+    let txt = "X: hey\nY: Yo!"
+        kvmap = KVMap $ H.fromList [
+          ("X", "hey"),
+          ("Y", "Yo!")
+          ]
+    it "should parse a kv map" $ do
+      case parse parseKVMap txt of
+        Done _ kvmap' -> kvmap' `shouldBe` kvmap
+        Fail _ _ message -> error message
 
 nixCacheInfoSpec :: Spec
 nixCacheInfoSpec = describe "nix-cache-info" $ do
@@ -15,7 +30,7 @@ nixCacheInfoSpec = describe "nix-cache-info" $ do
         info = NixCacheInfo {
           storeDir = "/test/store/dir",
           wantMassQuery = False,
-          priority = 0
+          priority = Nothing
           }
         unrender :: ByteString -> Either String NixCacheInfo
         unrender = mimeUnrender (Proxy :: Proxy OctetStream)
@@ -26,3 +41,19 @@ nixCacheInfoSpec = describe "nix-cache-info" $ do
     it "should fail if the storedir isn't there" $ do
       let bad = "StoreDerp: /test/store/derp"
       unrender bad `shouldSatisfy` isLeft
+    it "should grab wantmassquery" $ do
+      let txt = "StoreDir: /x\nWantMassQuery: 1"
+          info = NixCacheInfo {
+            storeDir = "/x",
+            wantMassQuery = True,
+            priority = Nothing
+            }
+      unrender txt `shouldBe` Right info
+    it "should grab priority" $ do
+      let txt = "Priority: 23\nStoreDir: /x\nWantMassQuery: 1"
+          info = NixCacheInfo {
+            storeDir = "/x",
+            wantMassQuery = True,
+            priority = Just 23
+            }
+      unrender txt `shouldBe` Right info

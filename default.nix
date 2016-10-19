@@ -3,7 +3,10 @@
   compiler ? "ghc7102"
 }:
 
+let
+  haskellPackages = pkgs.haskell.packages."${compiler}";
+in
+
 import ./project.nix {
-  inherit pkgs;
-  haskellPackages = pkgs.pkgs.haskell.packages."${compiler}";
+  inherit pkgs haskellPackages;
 }
