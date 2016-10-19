@@ -34,22 +34,28 @@ data NixCacheInfo = NixCacheInfo {
   -- ^ On-disk location of the nix store.
   wantMassQuery :: Bool,
   -- ^ Not sure what this does
-  priority :: Int
+  priority :: Maybe Int
   -- ^ Also not sure what this means.
   } deriving (Show, Eq, Generic)
 
 instance ToJSON NixCacheInfo
 instance FromJSON NixCacheInfo
 
+kvMapToNixCacheInfo :: KVMap -> Either String NixCacheInfo
+kvMapToNixCacheInfo (KVMap kvm) = case lookup "StoreDir" kvm of
+  Nothing -> Left "No StoreDir key defined."
+  Just sdir -> do
+    let wantMassQuery = lookup "WantMassQuery" kvm == Just "1"
+        priority = lookup "Priority" kvm >>= readMay
+    return $ NixCacheInfo (T.unpack sdir) wantMassQuery priority
+
 parseNixCacheInfo :: Parser NixCacheInfo
 parseNixCacheInfo = do
   string "StoreDir: "
   storeDir_ <- many $ notChar '\n'
-  return $ NixCacheInfo storeDir_ False 0
+  return $ NixCacheInfo storeDir_ False Nothing
 
 instance MimeUnrender OctetStream NixCacheInfo where
-  -- | TODO: this is of course not accurate
-  -- mimeUnrender :: Proxy OctetStream -> ByteString -> Either String NixCacheInfo
-  mimeUnrender _ bstring = case parse parseNixCacheInfo bstring of
-    Done _ info -> Right info
+  mimeUnrender _ bstring = case parse parseKVMap bstring of
+    Done _ kvmap -> kvMapToNixCacheInfo kvmap
     Fail _ _ message -> Left message

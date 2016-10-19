@@ -30,7 +30,7 @@ nixCacheInfoSpec = describe "nix-cache-info" $ do
         info = NixCacheInfo {
           storeDir = "/test/store/dir",
           wantMassQuery = False,
-          priority = 0
+          priority = Nothing
           }
         unrender :: ByteString -> Either String NixCacheInfo
         unrender = mimeUnrender (Proxy :: Proxy OctetStream)
@@ -41,3 +41,19 @@ nixCacheInfoSpec = describe "nix-cache-info" $ do
     it "should fail if the storedir isn't there" $ do
       let bad = "StoreDerp: /test/store/derp"
       unrender bad `shouldSatisfy` isLeft
+    it "should grab wantmassquery" $ do
+      let txt = "StoreDir: /x\nWantMassQuery: 1"
+          info = NixCacheInfo {
+            storeDir = "/x",
+            wantMassQuery = True,
+            priority = Nothing
+            }
+      unrender txt `shouldBe` Right info
+    it "should grab priority" $ do
+      let txt = "Priority: 23\nStoreDir: /x\nWantMassQuery: 1"
+          info = NixCacheInfo {
+            storeDir = "/x",
+            wantMassQuery = True,
+            priority = Just 23
+            }
+      unrender txt `shouldBe` Right info
