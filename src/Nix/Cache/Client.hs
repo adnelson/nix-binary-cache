@@ -18,8 +18,8 @@ nixCacheInfo = client (Proxy :: Proxy NixCacheAPI)
 -- | Base URL of the nixos cache.
 nixosCacheUrl :: BaseUrl
 nixosCacheUrl = BaseUrl {
-  baseUrlScheme = Http,
+  baseUrlScheme = Https,
   baseUrlHost = "cache.nixos.org",
-  baseUrlPort = 80,
+  baseUrlPort = 443,
   baseUrlPath = ""
   }

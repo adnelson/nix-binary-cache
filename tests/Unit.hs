@@ -12,14 +12,14 @@ import Nix.Tests.Cache.Client
 
 run :: BaseUrl -> IO ()
 run baseUrl = do
-  let managerSettings = case baseUrlScheme baseUrl of
-        Https -> tlsManagerSettings
-        _ -> defaultManagerSettings
-  manager <- newManager managerSettings
+  manager <- newManager $ case baseUrlScheme baseUrl of
+    Https -> tlsManagerSettings
+    _ -> defaultManagerSettings
   runExceptT (nixCacheInfo manager baseUrl) >>= \case
     Left err -> putStrLn $ "Error: " ++ tshow err
     Right info -> print info
 
 main :: IO()
-main = do
-  hspec nixCacheInfoSpec
+main = hspec $ do
+  nixCacheInfoSpec
+  kvMapSpec
