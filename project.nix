@@ -114,6 +114,7 @@ let
     [
       ":set prompt \"\\ESC[34mλ> \\ESC[m\""
       "import Data.Text (Text)"
+      "import qualified Servant"
       "import qualified Data.Text as T"
       "import qualified Data.Text.Encoding as T"
       ""
