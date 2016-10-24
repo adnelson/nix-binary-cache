@@ -1,6 +1,8 @@
-module Nix.Tests.Cache.Client where
+-- | Tests related to the base types that support the nix cache.
+module Nix.Cache.Types.Tests where
 
 import ClassyPrelude hiding (ByteString)
+import Test.QuickCheck (Arbitrary(..), property)
 import Data.Attoparsec.ByteString.Lazy (Result(..), parse)
 import Data.ByteString.Lazy (ByteString)
 import qualified Data.HashMap.Strict as H
@@ -9,6 +11,15 @@ import Test.Hspec (Spec, describe, it, shouldBe, shouldSatisfy)
 import Servant
 
 import Nix.Cache.Types
+
+instance Arbitrary Text where
+  arbitrary = fromString <$> arbitrary
+
+fileHashSpec :: Spec
+fileHashSpec = describe "file hashes" $ do
+  it "should parse from a string" $ do
+    property $ \hash -> do
+      fileHashFromText ("sha256:" <> hash) `shouldBe` Right (Sha256Hash hash)
 
 kvMapSpec :: Spec
 kvMapSpec = describe "KVMap" $ do

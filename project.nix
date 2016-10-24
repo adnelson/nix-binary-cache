@@ -100,7 +100,9 @@ let
   ];
 
   # Options for ghc when just testing.
-  ghc-test-options = ghc-options;
+  ghc-test-options = ghc-options ++ [
+    "-fno-warn-orphans"
+  ];
 
   # Inspect the servant derivation to see if it's an old version; if
   # so define a cpp flag.
@@ -114,6 +116,7 @@ let
     [
       ":set prompt \"\\ESC[34mλ> \\ESC[m\""
       "import Data.Text (Text)"
+      "import qualified Servant"
       "import qualified Data.Text as T"
       "import qualified Data.Text.Encoding as T"
       ""
@@ -193,14 +196,15 @@ haskellPackages.mkDerivation rec {
     cp -f ${cabalFile} ${pname}.cabal
   '';
   shellHook = ''
-    # Alias for entering REPL for unit tests.
-    alias testr='cabal repl unit-tests'
-
-    # Define a function which uses ghci to run unit tests.
-    runtests() { echo ':main' | testr; }
-
     # Make sure we're in the project directory, and do initialization.
     if [[ -e project.nix ]] && grep -q ${pname} project.nix; then
+      PROJECT_DIR=$PWD
+      # Alias for entering REPL for unit tests.
+      alias testr='(cd $PROJECT_DIR && cabal repl unit-tests)'
+
+      # Define a function which uses ghci to run unit tests.
+      runtests() ( cd $PROJECT_DIR && echo ':main' | cabal repl unit-tests; )
+
       cp -f ${dotGhci} .ghci
       eval "${preConfigure}"
       cabal configure --enable-tests
