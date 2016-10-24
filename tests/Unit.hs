@@ -8,18 +8,22 @@ import Control.Monad.Trans.Except (runExceptT)
 import Servant.Client
 
 import Nix.Cache.Client
+import Nix.Cache.Types
 import qualified Nix.Cache.Types.Tests as TypesTests
 
-run :: BaseUrl -> IO ()
-run baseUrl = do
+run :: Show a => BaseUrl -> ClientReq a -> IO ()
+run baseUrl req = do
   manager <- newManager $ case baseUrlScheme baseUrl of
     Https -> tlsManagerSettings
     _ -> defaultManagerSettings
-  runExceptT (nixCacheInfo manager baseUrl) >>= \case
+  runExceptT (req manager baseUrl) >>= \case
     Left err -> putStrLn $ "Error: " ++ tshow err
-    Right info -> print info
+    Right x -> print x
 
-main :: IO()
+runNixos :: Show a => ClientReq a -> IO ()
+runNixos = run nixosCacheUrl
+
+main :: IO ()
 main = hspec $ do
   TypesTests.nixCacheInfoSpec
   TypesTests.kvMapSpec

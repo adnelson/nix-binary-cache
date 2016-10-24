@@ -100,7 +100,9 @@ let
   ];
 
   # Options for ghc when just testing.
-  ghc-test-options = ghc-options;
+  ghc-test-options = ghc-options ++ [
+    "-fno-warn-orphans"
+  ];
 
   # Inspect the servant derivation to see if it's an old version; if
   # so define a cpp flag.

@@ -8,6 +8,10 @@ import Servant
 
 import Nix.Cache.Types
 
+-- | The nix cache API type.
+type NixCacheAPI = "nix-cache-info" :> Get '[OctetStream] NixCacheInfo
+              :<|> Capture "narinfo" StorePrefix :> Get '[BOctetStream] NarInfo
+
 -- Make a client request returning a `t`.
 type ClientReq t = Manager -> BaseUrl -> ExceptT ServantError IO t
 

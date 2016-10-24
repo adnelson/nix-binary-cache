@@ -1,15 +1,30 @@
+{-# LANGUAGE UndecidableInstances #-}
 -- | Types relating to a nix binary cache.
 module Nix.Cache.Types where
 
 import ClassyPrelude
 import qualified Data.HashMap.Strict as H
 import qualified Data.Text as T
-import Servant.API ((:<|>), (:>), Get, Capture)
 import Data.Attoparsec.ByteString.Char8 (char, notChar, space, endOfLine,
                                          many1)
 import Data.Attoparsec.ByteString.Lazy (Result(..), Parser, parse)
 import Data.Aeson (ToJSON, FromJSON)
-import Servant (MimeUnrender(..), OctetStream, ToHttpApiData(..))
+import Servant (MimeUnrender(..), OctetStream, ToHttpApiData(..), Accept(..),
+                Proxy(..))
+import Network.HTTP.Media ((//))
+
+
+-- | binary/octet-stream type. Same as application/octet-stream.
+data BOctetStream
+
+instance Accept BOctetStream where
+  contentType _ = "binary" // "octet-stream"
+
+-- | Convert OctetStream instances to BOctetStream instances. This is
+-- why we need UndecidableInstances above.
+instance MimeUnrender OctetStream t =>
+         MimeUnrender BOctetStream t where
+  mimeUnrender _ = mimeUnrender (Proxy :: Proxy OctetStream)
 
 -- | Some nix cache information comes in a line-separated "Key: Value"
 -- format. Here we represent that as a map.
@@ -45,7 +60,7 @@ instance FromKVMap NixCacheInfo where
 
 -- | To parse something from an octet stream, first parse the
 -- stream as a KVMap and then attempt to translate it.
-instance MimeUnrender OctetStream NixCacheInfo where
+instance FromKVMap t => MimeUnrender OctetStream t where
   mimeUnrender _ bstring = case parse parseKVMap bstring of
     Done _ kvmap -> fromKVMap kvmap
     Fail _ _ message -> Left message
@@ -56,12 +71,15 @@ newtype StorePrefix = StorePrefix Text
 
 -- | A representation of a sha256 hash. This is encoded as a string in
 -- the form "sha256:<hash>". The <hash> part might be encoded in hex
--- or in base32.
+-- or in base32. We might later support other hash types.
 newtype FileHash = Sha256Hash Text
   deriving (Show, Eq, Generic)
 
+-- | Translate text into a FileHash object.
 fileHashFromText :: Text -> Either String FileHash
-fileHashFromText = undefined
+fileHashFromText txt = case "sha256:" `T.isPrefixOf` txt of
+  True -> return $ Sha256Hash $ T.drop 7 txt
+  False -> Left $ "Not a sha256 hash: " <> show txt
 
 -- | Nix archive info.
 data NarInfo = NarInfo {
@@ -99,16 +117,6 @@ instance FromKVMap NarInfo where
         deriver = Nothing
     return $ NarInfo storePath narHash narSize fileSize fileHash
                references deriver
-
-instance MimeUnrender OctetStream NarInfo where
-  mimeUnrender _ bstring = case parse parseKVMap bstring of
-    Done _ kvmap -> fromKVMap kvmap
-    Fail _ _ message -> Left message
-
--- | The nix cache API type.
-type NixCacheAPI = "nix-cache-info" :> Get '[OctetStream] NixCacheInfo
-              :<|> Capture "narinfo" StorePrefix :> Get '[OctetStream] NarInfo
-
 
 -- | KVMaps can be parsed from text.
 parseKVMap :: Parser KVMap

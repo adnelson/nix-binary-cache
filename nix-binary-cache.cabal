@@ -27,7 +27,7 @@ test-suite unit-tests
   hs-source-dirs:      src, tests
   main-is:             Unit.hs
   build-depends:       aeson, aeson-compat, attoparsec, base, bytestring, classy-prelude, directory, HsOpenSSL, http-client, http-client-openssl, http-client-tls, http-media, http-types, mtl, servant-client, servant-server, servant, text, transformers, unordered-containers, wai, wai-extra, warp, QuickCheck, hspec
-  ghc-options:         -Wall -fwarn-tabs -fno-warn-unused-do-bind -fno-warn-name-shadowing -threaded -rtsopts -with-rtsopts=-N
+  ghc-options:         -Wall -fwarn-tabs -fno-warn-unused-do-bind -fno-warn-name-shadowing -threaded -rtsopts -with-rtsopts=-N -fno-warn-orphans
   cpp-options:         -DUNIT_TESTS 
   default-language:    Haskell2010
   default-extensions:  ConstraintKinds, CPP, DataKinds, DeriveGeneric, FlexibleContexts, FlexibleInstances, GADTs, GeneralizedNewtypeDeriving, LambdaCase, MultiParamTypeClasses, NoImplicitPrelude, OverloadedStrings, QuasiQuotes, RecordWildCards, ScopedTypeVariables, TypeFamilies, TypeOperators, TypeSynonymInstances, ViewPatterns
