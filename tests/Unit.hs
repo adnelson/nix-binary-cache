@@ -11,6 +11,7 @@ import Nix.Cache.Client
 import Nix.Cache.Types
 import qualified Nix.Cache.Types.Tests as TypesTests
 
+-- | This function for easy testing.
 run :: Show a => BaseUrl -> ClientReq a -> IO ()
 run baseUrl req = do
   manager <- newManager $ case baseUrlScheme baseUrl of
@@ -20,6 +21,7 @@ run baseUrl req = do
     Left err -> putStrLn $ "Error: " ++ tshow err
     Right x -> print x
 
+-- | Make a request against the nixos cache.
 runNixos :: Show a => ClientReq a -> IO ()
 runNixos = run nixosCacheUrl
 
@@ -27,3 +29,4 @@ main :: IO ()
 main = hspec $ do
   TypesTests.nixCacheInfoSpec
   TypesTests.kvMapSpec
+  TypesTests.fileHashSpec
