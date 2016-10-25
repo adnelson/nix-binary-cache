@@ -13,7 +13,6 @@ import Servant (MimeUnrender(..), OctetStream, ToHttpApiData(..), Accept(..),
                 Proxy(..))
 import Network.HTTP.Media ((//))
 
-
 -- | binary/octet-stream type. Same as application/octet-stream.
 data BOctetStream
 
@@ -69,6 +68,12 @@ instance FromKVMap t => MimeUnrender OctetStream t where
 newtype StorePrefix = StorePrefix Text
   deriving (Show, Eq, Generic)
 
+newtype NarInfoReq = NarInfoReq StorePrefix
+
+-- | Store prefixes are used to request NAR information.
+instance ToHttpApiData NarInfoReq where
+  toUrlPiece (NarInfoReq (StorePrefix prefix)) = prefix <> ".narinfo"
+
 -- | A representation of a sha256 hash. This is encoded as a string in
 -- the form "sha256:<hash>". The <hash> part might be encoded in hex
 -- or in base32. We might later support other hash types.
@@ -81,7 +86,8 @@ fileHashFromText txt = case "sha256:" `T.isPrefixOf` txt of
   True -> return $ Sha256Hash $ T.drop 7 txt
   False -> Left $ "Not a sha256 hash: " <> show txt
 
--- | Nix archive info.
+-- | Nix archive info. This returns metadata about an object that the
+-- binary cache can serve to a client.
 data NarInfo = NarInfo {
   storePath :: FilePath, -- ^ Path of the store object.
   narHash :: FileHash, -- ^ Hash of the nix archive.
@@ -91,9 +97,6 @@ data NarInfo = NarInfo {
   references :: [FilePath], -- ^ Other store objects this references.
   deriver :: Maybe FilePath -- ^ The derivation file for this object.
   } deriving (Show, Eq, Generic)
-
-instance ToHttpApiData StorePrefix where
-  toUrlPiece (StorePrefix prefix) = prefix <> ".narinfo"
 
 instance FromKVMap NarInfo where
   fromKVMap (KVMap kvm) = do
@@ -117,6 +120,20 @@ instance FromKVMap NarInfo where
         deriver = Nothing
     return $ NarInfo storePath narHash narSize fileSize fileHash
                references deriver
+
+-- | Types of compression supported for NAR archives.
+data NarCompressionType = NarBzip2 | NarXzip
+  deriving (Show, Eq, Generic)
+
+data NarReq = NarReq StorePrefix NarCompressionType
+  deriving (Show, Eq, Generic)
+
+-- | Store prefixes are used to request NAR information.
+instance ToHttpApiData NarReq where
+  toUrlPiece (NarReq (StorePrefix prefix) ctype) = prefix <> ext where
+    ext = ".nar." <> case ctype of
+      NarBzip2 -> "bz2"
+      NarXzip -> "xz"
 
 -- | KVMaps can be parsed from text.
 parseKVMap :: Parser KVMap

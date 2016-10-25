@@ -14,7 +14,7 @@ type ClientReq t = Manager -> BaseUrl -> ExceptT ServantError IO t
 
 -- | Define the client by pattern matching.
 nixCacheInfo :: ClientReq NixCacheInfo
-narInfo :: StorePrefix -> ClientReq NarInfo
+narInfo :: NarInfoReq -> ClientReq NarInfo
 nixCacheInfo
   :<|> narInfo = client (Proxy :: Proxy NixCacheAPI)
 
