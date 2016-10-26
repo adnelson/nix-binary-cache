@@ -127,8 +127,8 @@ instance FromKVMap NarInfo where
             True -> case suf `T.isSuffixOf` txt of
               False -> Left $ "Expected nar req to end with " <> show suf
               True -> do
-                let storePrefix = T.drop 4 $ T.dropEnd (length suf) txt
-                return $ NarReq (StorePrefix storePrefix) compType
+                let narPath = T.drop 4 $ T.dropEnd (length suf) txt
+                return $ NarReq narPath compType
 
     storePath <- T.unpack <$> lookupE "StorePath"
     narHash <- lookupE "NarHash" >>= fileHashFromText
@@ -160,12 +160,15 @@ compTypeToExt NarBzip2 = ".nar.bz2"
 compTypeToExt NarXzip = ".nar.xz"
 
 -- | Request for a nix archive.
-data NarReq = NarReq StorePrefix NarCompressionType
+-- The first argument is some sort of key that the server provides (as
+-- a response to the .narinfo route) for how to fetch the package. The
+-- second argument is the compression type.
+data NarReq = NarReq Text NarCompressionType
   deriving (Show, Eq, Generic)
 
 -- | Store prefixes are used to request NAR information.
 instance ToHttpApiData NarReq where
-  toUrlPiece (NarReq (StorePrefix prefix) ctype) = prefix <> compTypeToExt ctype
+  toUrlPiece (NarReq path ctype) = path <> compTypeToExt ctype
 
 -- | An archied nix store object.
 newtype Nar = Nar ByteString
@@ -173,7 +176,7 @@ newtype Nar = Nar ByteString
 
 -- | Make a custom show instance so that we don't dump binary data to screen.
 instance Show Nar where
-  show (Nar bs) = "Nix archive, length " <> show (B.length bs)
+  show (Nar bs) = "Nix archive, " <> show (B.length bs) <> " bytes"
 
 -- | In the future, we could do validation on this.
 instance MimeUnrender OctetStream Nar where
