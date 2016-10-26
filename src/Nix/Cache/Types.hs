@@ -154,6 +154,7 @@ instance MimeUnrender OctetStream NarInfo where
 data NarCompressionType = NarBzip2 | NarXzip
   deriving (Show, Eq, Generic)
 
+-- | Convert a compression type into a filename extension.
 compTypeToExt :: NarCompressionType -> Text
 compTypeToExt NarBzip2 = ".nar.bz2"
 compTypeToExt NarXzip = ".nar.xz"
