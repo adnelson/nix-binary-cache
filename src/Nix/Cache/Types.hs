@@ -60,7 +60,7 @@ instance FromKVMap NixCacheInfo where
 
 -- | To parse something from an octet stream, first parse the
 -- stream as a KVMap and then attempt to translate it.
-instance FromKVMap t => MimeUnrender OctetStream t where
+instance MimeUnrender OctetStream NixCacheInfo where
   mimeUnrender _ bstring = case parse parseKVMap bstring of
     Done _ kvmap -> fromKVMap kvmap
     Fail _ _ message -> Left message
@@ -122,6 +122,11 @@ instance FromKVMap NarInfo where
         deriver = Nothing
     return $ NarInfo storePath narHash narSize fileSize fileHash
                references deriver
+
+instance MimeUnrender OctetStream NarInfo where
+  mimeUnrender _ bstring = case parse parseKVMap bstring of
+    Done _ kvmap -> fromKVMap kvmap
+    Fail _ _ message -> Left message
 
 -- | Types of compression supported for NAR archives.
 data NarCompressionType = NarBzip2 | NarXzip
