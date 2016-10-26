@@ -16,9 +16,11 @@ type ClientReq t = Manager -> BaseUrl -> ExceptT ServantError IO t
 nixCacheInfo :: ClientReq NixCacheInfo
 narInfo :: NarInfoReq -> ClientReq NarInfo
 nar :: NarReq -> ClientReq Nar
+queryPaths :: Vector FilePath -> ClientReq (Vector FilePath)
 nixCacheInfo
   :<|> narInfo
-  :<|> nar = client (Proxy :: Proxy NixCacheAPI)
+  :<|> nar
+  :<|> queryPaths = client (Proxy :: Proxy NixCacheAPI)
 
 -- | Base URL of the nixos cache.
 nixosCacheUrl :: BaseUrl
