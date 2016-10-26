@@ -8,3 +8,4 @@ import Nix.Cache.Types
 -- | The nix cache API type.
 type NixCacheAPI = "nix-cache-info" :> Get '[OctetStream] NixCacheInfo
               :<|> Capture "narinfo" NarInfoReq :> Get '[BOctetStream] NarInfo
+              :<|> Capture "nar" NarReq :> Get '[OctetStream] Nar

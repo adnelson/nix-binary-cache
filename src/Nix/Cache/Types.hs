@@ -3,6 +3,7 @@
 module Nix.Cache.Types where
 
 import ClassyPrelude
+import qualified Data.ByteString as B
 import qualified Data.HashMap.Strict as H
 import qualified Data.Text as T
 import Data.Attoparsec.ByteString.Char8 (char, notChar, space, endOfLine,
@@ -68,6 +69,7 @@ instance FromKVMap t => MimeUnrender OctetStream t where
 newtype StorePrefix = StorePrefix Text
   deriving (Show, Eq, Generic)
 
+-- | Requesting information about a nix archive, by providing its store prefix.
 newtype NarInfoReq = NarInfoReq StorePrefix
 
 -- | Store prefixes are used to request NAR information.
@@ -125,6 +127,7 @@ instance FromKVMap NarInfo where
 data NarCompressionType = NarBzip2 | NarXzip
   deriving (Show, Eq, Generic)
 
+-- | Request for a nix archive.
 data NarReq = NarReq StorePrefix NarCompressionType
   deriving (Show, Eq, Generic)
 
@@ -134,6 +137,18 @@ instance ToHttpApiData NarReq where
     ext = ".nar." <> case ctype of
       NarBzip2 -> "bz2"
       NarXzip -> "xz"
+
+-- | An archied nix store object.
+newtype Nar = Nar ByteString
+  deriving (Eq, Generic)
+
+-- | Make a custom show instance so that we don't dump binary data to screen.
+instance Show Nar where
+  show (Nar bs) = "Nix archive, length " <> show (B.length bs)
+
+-- | In the future, we could do validation on this.
+instance MimeUnrender OctetStream Nar where
+  mimeUnrender _ = return . Nar . toStrict
 
 -- | KVMaps can be parsed from text.
 parseKVMap :: Parser KVMap
