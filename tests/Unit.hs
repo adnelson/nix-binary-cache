@@ -12,17 +12,17 @@ import Nix.Cache.Types
 import qualified Nix.Cache.Types.Tests as TypesTests
 
 -- | This function for easy testing.
-run :: Show a => BaseUrl -> ClientReq a -> IO ()
+run :: BaseUrl -> ClientReq a -> IO a
 run baseUrl req = do
   manager <- newManager $ case baseUrlScheme baseUrl of
     Https -> tlsManagerSettings
     _ -> defaultManagerSettings
   runExceptT (req manager baseUrl) >>= \case
-    Left err -> putStrLn $ "Error: " ++ tshow err
-    Right x -> print x
+    Left err -> error $ show err
+    Right x -> return x
 
 -- | Make a request against the nixos cache.
-runNixos :: Show a => ClientReq a -> IO ()
+runNixos :: ClientReq a -> IO a
 runNixos = run nixosCacheUrl
 
 main :: IO ()

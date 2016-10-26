@@ -3,6 +3,7 @@
 module Nix.Cache.Types where
 
 import ClassyPrelude
+import qualified Data.ByteString as B
 import qualified Data.HashMap.Strict as H
 import qualified Data.Text as T
 import Data.Attoparsec.ByteString.Char8 (char, notChar, space, endOfLine,
@@ -12,7 +13,6 @@ import Data.Aeson (ToJSON, FromJSON)
 import Servant (MimeUnrender(..), OctetStream, ToHttpApiData(..), Accept(..),
                 Proxy(..))
 import Network.HTTP.Media ((//))
-
 
 -- | binary/octet-stream type. Same as application/octet-stream.
 data BOctetStream
@@ -60,7 +60,7 @@ instance FromKVMap NixCacheInfo where
 
 -- | To parse something from an octet stream, first parse the
 -- stream as a KVMap and then attempt to translate it.
-instance FromKVMap t => MimeUnrender OctetStream t where
+instance MimeUnrender OctetStream NixCacheInfo where
   mimeUnrender _ bstring = case parse parseKVMap bstring of
     Done _ kvmap -> fromKVMap kvmap
     Fail _ _ message -> Left message
@@ -68,6 +68,13 @@ instance FromKVMap t => MimeUnrender OctetStream t where
 -- | The 32-character prefix of an object in the nix store.
 newtype StorePrefix = StorePrefix Text
   deriving (Show, Eq, Generic)
+
+-- | Requesting information about a nix archive, by providing its store prefix.
+newtype NarInfoReq = NarInfoReq StorePrefix
+
+-- | Store prefixes are used to request NAR information.
+instance ToHttpApiData NarInfoReq where
+  toUrlPiece (NarInfoReq (StorePrefix prefix)) = prefix <> ".narinfo"
 
 -- | A representation of a sha256 hash. This is encoded as a string in
 -- the form "sha256:<hash>". The <hash> part might be encoded in hex
@@ -81,19 +88,20 @@ fileHashFromText txt = case "sha256:" `T.isPrefixOf` txt of
   True -> return $ Sha256Hash $ T.drop 7 txt
   False -> Left $ "Not a sha256 hash: " <> show txt
 
--- | Nix archive info.
+-- | Nix archive info. This returns metadata about an object that the
+-- binary cache can serve to a client.
 data NarInfo = NarInfo {
   storePath :: FilePath, -- ^ Path of the store object.
   narHash :: FileHash, -- ^ Hash of the nix archive.
   narSize :: Int, -- ^ Size of the nix archive.
   fileSize :: Int, -- ^ Size of the uncompressed store object.
   fileHash :: FileHash, -- ^ Hash of the uncompressed store object.
+  narReq :: NarReq, -- ^ How to request this NAR.
+  compression :: NarCompressionType, -- ^ How this NAR is compressed.
   references :: [FilePath], -- ^ Other store objects this references.
-  deriver :: Maybe FilePath -- ^ The derivation file for this object.
+  deriver :: Maybe FilePath, -- ^ The derivation file for this object.
+  sig :: Maybe Text -- Possible signature of the cache.
   } deriving (Show, Eq, Generic)
-
-instance ToHttpApiData StorePrefix where
-  toUrlPiece (StorePrefix prefix) = prefix <> ".narinfo"
 
 instance FromKVMap NarInfo where
   fromKVMap (KVMap kvm) = do
@@ -105,18 +113,70 @@ instance FromKVMap NarInfo where
           _ -> Left $ show txt <> " is not a non-negative integer"
         -- | Split a text on whitespace. Derp.
         splitWS = filter (/= "") . T.split (flip elem [' ', '\t', '\n', '\r'])
+        -- | Convert a compression type string.
+        parseCompressionType "xz" = return NarXzip
+        parseCompressionType "xzip" = return NarXzip
+        parseCompressionType "bz2" = return NarBzip2
+        parseCompressionType "bzip2" = return NarBzip2
+        parseCompressionType ctype = Left (show ctype <>
+                                           " is not a known compression type.")
+        parseNarReq compType txt = do
+          let suf = compTypeToExt compType
+          case "nar/" `T.isPrefixOf` txt of
+            False -> Left "Expected nar req to start with 'nar/'"
+            True -> case suf `T.isSuffixOf` txt of
+              False -> Left $ "Expected nar req to end with " <> show suf
+              True -> do
+                let storePrefix = T.drop 4 $ T.dropEnd (length suf) txt
+                return $ NarReq (StorePrefix storePrefix) compType
 
     storePath <- T.unpack <$> lookupE "StorePath"
     narHash <- lookupE "NarHash" >>= fileHashFromText
     narSize <- lookupE "NarSize" >>= parseNonNegInt
     fileSize <- lookupE "FileSize" >>= parseNonNegInt
     fileHash <- lookupE "FileHash" >>= fileHashFromText
+    compression <- lookupE "Compression" >>= parseCompressionType
+    narReq <-  lookupE "URL" >>= parseNarReq compression
     let references = case lookup "References" kvm of
           Nothing -> []
           Just refs -> map T.unpack $ splitWS refs
         deriver = Nothing
+        sig = lookup "Sig" kvm
     return $ NarInfo storePath narHash narSize fileSize fileHash
-               references deriver
+               narReq compression references deriver sig
+
+instance MimeUnrender OctetStream NarInfo where
+  mimeUnrender _ bstring = case parse parseKVMap bstring of
+    Done _ kvmap -> fromKVMap kvmap
+    Fail _ _ message -> Left message
+
+-- | Types of compression supported for NAR archives.
+data NarCompressionType = NarBzip2 | NarXzip
+  deriving (Show, Eq, Generic)
+
+compTypeToExt :: NarCompressionType -> Text
+compTypeToExt NarBzip2 = ".nar.bz2"
+compTypeToExt NarXzip = ".nar.xz"
+
+-- | Request for a nix archive.
+data NarReq = NarReq StorePrefix NarCompressionType
+  deriving (Show, Eq, Generic)
+
+-- | Store prefixes are used to request NAR information.
+instance ToHttpApiData NarReq where
+  toUrlPiece (NarReq (StorePrefix prefix) ctype) = prefix <> compTypeToExt ctype
+
+-- | An archied nix store object.
+newtype Nar = Nar ByteString
+  deriving (Eq, Generic)
+
+-- | Make a custom show instance so that we don't dump binary data to screen.
+instance Show Nar where
+  show (Nar bs) = "Nix archive, length " <> show (B.length bs)
+
+-- | In the future, we could do validation on this.
+instance MimeUnrender OctetStream Nar where
+  mimeUnrender _ = return . Nar . toStrict
 
 -- | KVMaps can be parsed from text.
 parseKVMap :: Parser KVMap
