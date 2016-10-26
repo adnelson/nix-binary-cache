@@ -12,6 +12,7 @@ let
     "attoparsec"
     "base"
     "bytestring"
+    "base64-bytestring"
     "classy-prelude"
     "directory"
     "HsOpenSSL"
@@ -196,6 +197,7 @@ haskellPackages.mkDerivation rec {
     cp -f ${cabalFile} ${pname}.cabal
   '';
   shellHook = ''
+    export CURL_CA_BUNDLE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
     # Make sure we're in the project directory, and do initialization.
     if [[ -e project.nix ]] && grep -q ${pname} project.nix; then
       PROJECT_DIR=$PWD
