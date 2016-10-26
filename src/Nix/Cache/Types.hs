@@ -96,7 +96,7 @@ data NarInfo = NarInfo {
   narSize :: Int, -- ^ Size of the nix archive.
   fileSize :: Int, -- ^ Size of the uncompressed store object.
   fileHash :: FileHash, -- ^ Hash of the uncompressed store object.
-  fileUrl :: FilePath, -- ^ URL postfix for requesting this NAR.
+  narReq :: NarReq, -- ^ How to request this NAR.
   compression :: NarCompressionType, -- ^ How this NAR is compressed.
   references :: [FilePath], -- ^ Other store objects this references.
   deriver :: Maybe FilePath, -- ^ The derivation file for this object.
@@ -120,21 +120,30 @@ instance FromKVMap NarInfo where
         parseCompressionType "bzip2" = return NarBzip2
         parseCompressionType ctype = Left (show ctype <>
                                            " is not a known compression type.")
+        parseNarReq compType txt = do
+          let suf = compTypeToExt compType
+          case "nar/" `T.isPrefixOf` txt of
+            False -> Left "Expected nar req to start with 'nar/'"
+            True -> case suf `T.isSuffixOf` txt of
+              False -> Left $ "Expected nar req to end with " <> show suf
+              True -> do
+                let storePrefix = T.drop 4 $ T.dropEnd (length suf) txt
+                return $ NarReq (StorePrefix storePrefix) compType
 
     storePath <- T.unpack <$> lookupE "StorePath"
     narHash <- lookupE "NarHash" >>= fileHashFromText
     narSize <- lookupE "NarSize" >>= parseNonNegInt
     fileSize <- lookupE "FileSize" >>= parseNonNegInt
     fileHash <- lookupE "FileHash" >>= fileHashFromText
-    fileUrl <- T.unpack <$> lookupE "URL"
     compression <- lookupE "Compression" >>= parseCompressionType
+    narReq <-  lookupE "URL" >>= parseNarReq compression
     let references = case lookup "References" kvm of
           Nothing -> []
           Just refs -> map T.unpack $ splitWS refs
         deriver = Nothing
         sig = lookup "Sig" kvm
     return $ NarInfo storePath narHash narSize fileSize fileHash
-               fileUrl compression references deriver sig
+               narReq compression references deriver sig
 
 instance MimeUnrender OctetStream NarInfo where
   mimeUnrender _ bstring = case parse parseKVMap bstring of
@@ -145,16 +154,17 @@ instance MimeUnrender OctetStream NarInfo where
 data NarCompressionType = NarBzip2 | NarXzip
   deriving (Show, Eq, Generic)
 
+compTypeToExt :: NarCompressionType -> Text
+compTypeToExt NarBzip2 = ".nar.bz2"
+compTypeToExt NarXzip = ".nar.xz"
+
 -- | Request for a nix archive.
 data NarReq = NarReq StorePrefix NarCompressionType
   deriving (Show, Eq, Generic)
 
 -- | Store prefixes are used to request NAR information.
 instance ToHttpApiData NarReq where
-  toUrlPiece (NarReq (StorePrefix prefix) ctype) = prefix <> ext where
-    ext = ".nar." <> case ctype of
-      NarBzip2 -> "bz2"
-      NarXzip -> "xz"
+  toUrlPiece (NarReq (StorePrefix prefix) ctype) = prefix <> compTypeToExt ctype
 
 -- | An archied nix store object.
 newtype Nar = Nar ByteString
