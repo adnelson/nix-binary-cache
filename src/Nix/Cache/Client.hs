@@ -15,10 +15,10 @@ type ClientReq t = Manager -> BaseUrl -> ExceptT ServantError IO t
 -- | Define the client by pattern matching.
 nixCacheInfo :: ClientReq NixCacheInfo
 narInfo :: NarInfoReq -> ClientReq NarInfo
-narInfoReq :: NarReq -> ClientReq Nar
+nar :: NarReq -> ClientReq Nar
 nixCacheInfo
   :<|> narInfo
-  :<|> narInfoReq = client (Proxy :: Proxy NixCacheAPI)
+  :<|> nar = client (Proxy :: Proxy NixCacheAPI)
 
 -- | Base URL of the nixos cache.
 nixosCacheUrl :: BaseUrl

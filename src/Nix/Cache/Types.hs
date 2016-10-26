@@ -96,8 +96,11 @@ data NarInfo = NarInfo {
   narSize :: Int, -- ^ Size of the nix archive.
   fileSize :: Int, -- ^ Size of the uncompressed store object.
   fileHash :: FileHash, -- ^ Hash of the uncompressed store object.
+  fileUrl :: FilePath, -- ^ URL postfix for requesting this NAR.
+  compression :: NarCompressionType, -- ^ How this NAR is compressed.
   references :: [FilePath], -- ^ Other store objects this references.
-  deriver :: Maybe FilePath -- ^ The derivation file for this object.
+  deriver :: Maybe FilePath, -- ^ The derivation file for this object.
+  sig :: Maybe Text -- Possible signature of the cache.
   } deriving (Show, Eq, Generic)
 
 instance FromKVMap NarInfo where
@@ -110,18 +113,28 @@ instance FromKVMap NarInfo where
           _ -> Left $ show txt <> " is not a non-negative integer"
         -- | Split a text on whitespace. Derp.
         splitWS = filter (/= "") . T.split (flip elem [' ', '\t', '\n', '\r'])
+        -- | Convert a compression type string.
+        parseCompressionType "xz" = return NarXzip
+        parseCompressionType "xzip" = return NarXzip
+        parseCompressionType "bz2" = return NarBzip2
+        parseCompressionType "bzip2" = return NarBzip2
+        parseCompressionType ctype = Left (show ctype <>
+                                           " is not a known compression type.")
 
     storePath <- T.unpack <$> lookupE "StorePath"
     narHash <- lookupE "NarHash" >>= fileHashFromText
     narSize <- lookupE "NarSize" >>= parseNonNegInt
     fileSize <- lookupE "FileSize" >>= parseNonNegInt
     fileHash <- lookupE "FileHash" >>= fileHashFromText
+    fileUrl <- T.unpack <$> lookupE "URL"
+    compression <- lookupE "Compression" >>= parseCompressionType
     let references = case lookup "References" kvm of
           Nothing -> []
           Just refs -> map T.unpack $ splitWS refs
         deriver = Nothing
+        sig = lookup "Sig" kvm
     return $ NarInfo storePath narHash narSize fileSize fileHash
-               references deriver
+               fileUrl compression references deriver sig
 
 instance MimeUnrender OctetStream NarInfo where
   mimeUnrender _ bstring = case parse parseKVMap bstring of
