@@ -1,10 +1,8 @@
 -- | Nix derivations.
 module Nix.Derivation where
 
-import Prelude (read)
 import ClassyPrelude
 import Text.Parsec
-import Text.Parsec.Token
 import qualified Data.HashMap.Strict as H
 
 type Parser a = Parsec [Char] () a
@@ -12,6 +10,8 @@ type Parser a = Parsec [Char] () a
 -- | Objects in the nix store.
 newtype StorePath = StorePath Text
   deriving (Show, Eq, Generic)
+
+instance Hashable StorePath
 
 toFullPath :: FilePath -- ^ Path to the nix store.
            -> StorePath -- ^ Store path.
@@ -26,14 +26,14 @@ data Derivation = Derivation {
   -- outputs of those derivations.
   derivInputPaths :: [StorePath],
   -- ^ Non-derivation inputs the derivation needs in order to build.
+  derivSystem :: Text,
+  -- ^ System the derivation is to be built on.
   derivBuilder :: StorePath,
   -- ^ Path to the executable to build the derivation.
   derivArgs :: [Text],
   -- ^ Arguments to the builder.
-  derivEnv :: HashMap Text Text,
+  derivEnv :: HashMap Text Text
   -- ^ Environment to run the builder in.
-  derivSystem :: Text
-  -- ^ System the derivation is to be built on.
   } deriving (Show, Eq, Generic)
 
 -- | Parses a string constant.
@@ -54,16 +54,56 @@ parseText = char '"' >> loop [] where
 surround :: Char -> Char -> Parser a -> Parser a
 surround start stop p = char start *> p <* char stop
 
-parseDerivation :: Parser (HashMap Text Text)
+parseDerivation :: Parser Derivation
 parseDerivation = do
+  let parens = surround '(' ')'
+      brackets = surround '[' ']'
+      sepCommas = flip sepBy (char ',')
+      sepCommas1 = flip sepBy1 (char ',')
+      textList = brackets $ sepCommas parseText
   string "Derive"
-  surround '(' ')' $ do
-    outs <- surround '[' ']' $ flip sepBy1 (char ',') $ do
-      surround '(' ')' $ do
+  parens $ do
+    -- Grab the output list. This is a comma-separated list of
+    -- 4-tuples, like so:
+    -- [("out","/nix/store/sldkfjslkdfj-foo","","")]
+    outs <- brackets $ sepCommas1 $ do
+      parens $ do
         outName <- parseText
         char ','
-        outPath <- parseText
+        outPath <- StorePath <$> parseText
         string ",\"\",\"\""
         return (outName, outPath)
-    return $ H.fromList outs
---  read <$> many1 digit
+    char ','
+    -- Grab the input derivation list. A comma-separated list of
+    -- 2-tuples like so:
+    -- [("/nix/store/abc-bar",["out"]), ("/nix/store/xyz-bux",["out","dev"])]
+    inDerivs <- brackets $ sepCommas $ do
+      parens $ do
+        inDName <- StorePath <$> parseText
+        char ','
+        inDOutputs <- textList
+        return (inDName, inDOutputs)
+    -- Grab the input file list (not derivations). Just a list of
+    -- strings.
+    inFiles <- char ',' >> map StorePath <$> textList
+    -- Grab the system info string.
+    system <- char ',' >> parseText
+    -- Grab the builder executable path.
+    builder <- char ',' >> StorePath <$> parseText
+    -- Grab the builder arguments.
+    builderArgs <- char ',' >> textList
+    -- Grab the build environment, a list of 2-tuples.
+    char ','
+    buildEnv <- map H.fromList $ brackets $ sepCommas $ parens $ do
+      key <- parseText
+      value <- char ',' *> parseText
+      return (key, value)
+    return $ Derivation {
+      derivOutputs = H.fromList outs,
+      derivInputDerivations = H.fromList inDerivs,
+      derivInputPaths = inFiles,
+      derivSystem = system,
+      derivBuilder = builder,
+      derivArgs = builderArgs,
+      derivEnv = buildEnv
+      }
