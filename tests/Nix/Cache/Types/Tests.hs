@@ -11,6 +11,7 @@ import Test.Hspec (Spec, describe, it, shouldBe, shouldSatisfy)
 import Servant
 
 import Nix.Cache.Types
+import Nix.Derivation (FileHash(..), fileHashFromText)
 
 instance Arbitrary Text where
   arbitrary = fromString <$> arbitrary

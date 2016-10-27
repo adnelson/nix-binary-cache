@@ -71,7 +71,9 @@ data Derivation = Derivation {
 -- | Parsec parser type.
 type Parser a = Parsec [Char] () a
 
--- | Parses a string constant.
+-- | Parses a string constant. Allows syntax for certain escape
+-- sequences (\n, \t, etc), and otherwise anything after a '\'
+-- will appear as-is (which allows " and \ to be escaped).
 text :: Parser Text
 text = char '"' >> loop [] where
   loop acc = do

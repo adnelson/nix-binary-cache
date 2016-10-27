@@ -14,6 +14,8 @@ import Servant (MimeUnrender(..), OctetStream, ToHttpApiData(..), Accept(..),
                 Proxy(..))
 import Network.HTTP.Media ((//))
 
+import Nix.Derivation (FileHash(..), fileHashFromText)
+
 -- | binary/octet-stream type. Same as application/octet-stream.
 data BOctetStream
 
@@ -75,18 +77,6 @@ newtype NarInfoReq = NarInfoReq StorePrefix
 -- | Store prefixes are used to request NAR information.
 instance ToHttpApiData NarInfoReq where
   toUrlPiece (NarInfoReq (StorePrefix prefix)) = prefix <> ".narinfo"
-
--- | A representation of a sha256 hash. This is encoded as a string in
--- the form "sha256:<hash>". The <hash> part might be encoded in hex
--- or in base32. We might later support other hash types.
-newtype FileHash = Sha256Hash Text
-  deriving (Show, Eq, Generic)
-
--- | Translate text into a FileHash object.
-fileHashFromText :: Text -> Either String FileHash
-fileHashFromText txt = case "sha256:" `T.isPrefixOf` txt of
-  True -> return $ Sha256Hash $ T.drop 7 txt
-  False -> Left $ "Not a sha256 hash: " <> show txt
 
 -- | Nix archive info. This returns metadata about an object that the
 -- binary cache can serve to a client.
