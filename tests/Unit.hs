@@ -14,6 +14,7 @@ import System.Environment (getEnv)
 
 import Nix.Cache.Client
 import Nix.Cache.Types
+import Nix.Derivation
 import qualified Nix.Cache.Types.Tests as TypesTests
 import qualified Nix.Derivation.Tests as DerivTests
 

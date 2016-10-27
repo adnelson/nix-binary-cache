@@ -110,3 +110,13 @@ derivationParser = do
       derivArgs = builderArgs,
       derivEnv = H.fromList buildEnv
       }
+
+-- | Parse a derivation string.
+parseDerivString :: String -> Either String Derivation
+parseDerivString s = case parse derivationParser "derivation" s of
+  Left err -> Left $ show err
+  Right deriv -> Right deriv
+
+-- | Parse a derivation file. Assumes the file exists.
+parseDerivFile :: FilePath -> IO (Either String Derivation)
+parseDerivFile p = parseDerivString <$> readFile p
