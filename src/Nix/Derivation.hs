@@ -7,7 +7,7 @@ import qualified Data.HashMap.Strict as H
 
 type Parser a = Parsec [Char] () a
 
--- | Objects in the nix store.
+-- | Path to an object in the nix store.
 newtype StorePath = StorePath Text
   deriving (Show, Eq, Generic)
 
@@ -37,8 +37,8 @@ data Derivation = Derivation {
   } deriving (Show, Eq, Generic)
 
 -- | Parses a string constant.
-parseText :: Parser Text
-parseText = char '"' >> loop [] where
+text :: Parser Text
+text = char '"' >> loop [] where
   loop acc = do
     let continue c = loop (c:acc)
     anyChar >>= \case
@@ -51,16 +51,19 @@ parseText = char '"' >> loop [] where
         c -> continue c
       c -> continue c
 
+-- | Execute a parser surrounded by two characters.
 surround :: Char -> Char -> Parser a -> Parser a
 surround start stop p = char start *> p <* char stop
 
-parseDerivation :: Parser Derivation
-parseDerivation = do
+-- | Parse a derivation in the Parser monad.
+derivationParser :: Parser Derivation
+derivationParser = do
   let parens = surround '(' ')'
       brackets = surround '[' ']'
       sepCommas = flip sepBy (char ',')
       sepCommas1 = flip sepBy1 (char ',')
-      textList = brackets $ sepCommas parseText
+      textList = brackets $ sepCommas text
+  -- All derivations start with this string.
   string "Derive"
   parens $ do
     -- Grab the output list. This is a comma-separated list of
@@ -68,9 +71,9 @@ parseDerivation = do
     -- [("out","/nix/store/sldkfjslkdfj-foo","","")]
     outs <- brackets $ sepCommas1 $ do
       parens $ do
-        outName <- parseText
+        outName <- text
         char ','
-        outPath <- StorePath <$> parseText
+        outPath <- StorePath <$> text
         string ",\"\",\"\""
         return (outName, outPath)
     char ','
@@ -79,7 +82,7 @@ parseDerivation = do
     -- [("/nix/store/abc-bar",["out"]), ("/nix/store/xyz-bux",["out","dev"])]
     inDerivs <- brackets $ sepCommas $ do
       parens $ do
-        inDName <- StorePath <$> parseText
+        inDName <- StorePath <$> text
         char ','
         inDOutputs <- textList
         return (inDName, inDOutputs)
@@ -87,16 +90,16 @@ parseDerivation = do
     -- strings.
     inFiles <- char ',' >> map StorePath <$> textList
     -- Grab the system info string.
-    system <- char ',' >> parseText
+    system <- char ',' >> text
     -- Grab the builder executable path.
-    builder <- char ',' >> StorePath <$> parseText
+    builder <- char ',' >> StorePath <$> text
     -- Grab the builder arguments.
     builderArgs <- char ',' >> textList
     -- Grab the build environment, a list of 2-tuples.
     char ','
-    buildEnv <- map H.fromList $ brackets $ sepCommas $ parens $ do
-      key <- parseText
-      value <- char ',' *> parseText
+    buildEnv <- brackets $ sepCommas $ parens $ do
+      key <- text
+      value <- char ',' *> text
       return (key, value)
     return $ Derivation {
       derivOutputs = H.fromList outs,
@@ -105,5 +108,5 @@ parseDerivation = do
       derivSystem = system,
       derivBuilder = builder,
       derivArgs = builderArgs,
-      derivEnv = buildEnv
+      derivEnv = H.fromList buildEnv
       }
