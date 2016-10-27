@@ -28,7 +28,7 @@ exNarReq = NarReq hash NarXzip
   where hash = "11wzap2jfs9pfp4qxff2rqw1bq1cxwd297rf55sf3hq2hb0prwkv"
 
 -- | Username/password
-type BasicAuth = (Text, Text)
+data BasicAuth = BasicAuth Text Text
 
 -- | This function for easy testing.
 run :: Maybe BasicAuth -> BaseUrl -> ClientReq a -> IO a
@@ -40,7 +40,7 @@ run mauth baseUrl req = do
       -- to the Authorization header.
       modifyReq req = return $ case mauth of
         Nothing -> req
-        Just (username, password) -> do
+        Just (BasicAuth username password) -> do
           -- Encode the username:password in base64.
           let auth = username <> ":" <> password
           let authB64 = B64.encode $ T.encodeUtf8 auth
@@ -66,7 +66,7 @@ runNs req = do
     baseUrlPort = 443,
     baseUrlPath = ""
     }
-  run (Just (username, password)) nsCacheUrl req
+  run (Just $ BasicAuth username password) nsCacheUrl req
 
 -- | Make a request against the nixos cache.
 runNixos :: ClientReq a -> IO a
