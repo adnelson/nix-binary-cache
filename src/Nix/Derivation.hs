@@ -45,6 +45,9 @@ toFullPath :: FilePath -- ^ Path to the nix store.
            -> FilePath -- ^ Full path to the store object.
 toFullPath pathToStore (StorePath p) = pathToStore </> unpack p
 
+-- | The main derivation type. This represents all of the information
+-- that is needed to construct a particular store object; the store
+-- object(s) that will be built are listed in the `derivOutputs` field.
 data Derivation = Derivation {
   derivOutputs :: HashMap Text (StorePath, Maybe FileHash),
   -- ^ Outputs the derivation is expected to produce and what they're
