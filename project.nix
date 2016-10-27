@@ -22,6 +22,7 @@ let
     "http-media"
     "http-types"
     "mtl"
+    "parsec"
     "servant-client"
     "servant-server"
     "servant"

@@ -16,7 +16,7 @@ type ClientReq t = Manager -> BaseUrl -> ExceptT ServantError IO t
 nixCacheInfo :: ClientReq NixCacheInfo
 narInfo :: NarInfoReq -> ClientReq NarInfo
 nar :: NarReq -> ClientReq Nar
-queryPaths :: Vector FilePath -> ClientReq (Vector FilePath)
+queryPaths :: Vector FilePath -> ClientReq (HashMap FilePath Bool)
 nixCacheInfo
   :<|> narInfo
   :<|> nar
