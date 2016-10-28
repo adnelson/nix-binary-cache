@@ -33,12 +33,33 @@ nixosCacheUrl = BaseUrl {
   }
 
 -- | A dependency tree, represented as a mapping from a store path to
--- its set of dependent paths.
+-- its set of (immediate, not transitive) dependent paths.
 newtype PathTree = PathTree (HashMap StorePath (HashSet StorePath))
 
--- | Build a dependency tree given some starting store path.
-buildTree :: StorePath -> IO PathTree
-buildTree = undefined
+-- | Represents a path dependency cache. The cache is mutable, but
+-- the set of dependencies of any particular path is fixed.
+data PathCache = PathCache {
+  pathCacheLocation :: FilePath
+  } deriving (Show)
+
+-- | Configuration of the nix client.
+data NixClientConfig = NixClientConfig {
+  nccCacheLocation :: FilePath
+  } deriving (Show)
+
+-- | Nix client type.
+type NixClient a = ReaderT NixClientConfig IO a
+
+-- | Get the references of an object. Looks in and updates a global
+-- cache, since references are static information.
+getReferences :: StorePath -> NixClient (HashSet StorePath)
+getReferences path = undefined
+
+-- | Get the full dependency tree given some starting store path.
+buildTree :: StorePath -> PathTree -> IO PathTree
+buildTree path ptree@(PathTree tree) = case lookup path tree of
+  Just _ -> return ptree
+  Nothing -> undefined
 
 -- | Given a store path, fetch all of the NARs of the path's
 -- dependencies which are available from a cache, and put them in the
