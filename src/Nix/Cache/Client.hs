@@ -14,8 +14,7 @@ import qualified Data.HashMap.Strict as H
 
 import Nix.Cache.Common
 import Nix.Cache.API
-import Nix.Derivation (StorePath(..), spBasename, spFullpath,
-                       parseStorePath, ioParseStorePath)
+import Nix.StorePath
 import Nix.Cache.Types
 
 -- Make a client request returning a `t`.
@@ -42,7 +41,7 @@ nixosCacheUrl = BaseUrl {
 
 -- | A dependency tree, represented as a mapping from a store path to
 -- its set of (immediate, not transitive) dependent paths.
-newtype PathTree = PathTree (HashMap StorePath [StorePath])
+newtype PathTree = PathTree (HashMap StoreBasepath [StoreBasepath])
   deriving (Show, Eq, Generic, Monoid)
 
 listDirectory :: FilePath -> IO [FilePath]
@@ -65,28 +64,25 @@ writeCache :: FilePath -- ^ Path to the nix store.
 writeCache storeDir cacheLocation (PathTree tree) = do
   -- mkdir -p cacheLocation
   createDirectoryIfMissing True cacheLocation
-  writeFile (cacheLocation </> "store-dir") storeDir
   forM_ (H.toList tree) $ \(path, refs) -> do
-    let pathDir = cacheLocation </> spBasename path
+    let pathDir = cacheLocation </> sbpRender path
     createDirectoryIfMissing False pathDir
     forM_ refs $ \ref -> do
-      touchFile $ pathDir </> spBasename ref
+      touchFile $ pathDir </> sbpRender ref
 
 -- | Read a cache into memory.
 readCache :: FilePath -> IO PathTree
 readCache cacheLocation = doesDirectoryExist cacheLocation >>= \case
   False -> return mempty
   True -> do
-    storeDir <- readFile $ cacheLocation </> "store-dir"
-    paths <- filter (/= "store-dir") <$> listDirectory cacheLocation
+    paths <- listDirectory cacheLocation
     tuples <- forM paths $ \path -> do
-      spath <- ioParseStorePath $ pack path
+      bpath <- ioParseStoreBasepath $ pack path
       deps <- do
         depfiles <- listDirectory (cacheLocation </> path)
         forM depfiles $ \path -> do
-          spath' <- ioParseStorePath $ pack path
-          return spath' {spStoreDir=storeDir}
-      return (spath {spStoreDir=storeDir}, deps)
+          ioParseStoreBasepath $ pack path
+      return (bpath, deps)
     return $ PathTree $ H.fromList tuples
 
 -- | Represents a path dependency cache. The cache is mutable, but
@@ -123,11 +119,11 @@ getReferences spath = do
     Left err -> error err
     Right sp -> return sp
 
--- | Get the full dependency tree given some starting store path.
-buildTree :: StorePath -> PathTree -> IO PathTree
-buildTree path ptree@(PathTree tree) = case lookup path tree of
-  Just _ -> return ptree
-  Nothing -> undefined
+-- -- | Get the full dependency tree given some starting store path.
+-- buildTree :: StorePath -> PathTree -> IO PathTree
+-- buildTree path ptree@(PathTree tree) = case lookup path tree of
+--   Just _ -> return ptree
+--   Nothing -> undefined
 
 -- | Given a store path, fetch all of the NARs of the path's
 -- dependencies which are available from a cache, and put them in the

@@ -7,38 +7,7 @@ import qualified Data.Text as T
 import qualified Data.HashMap.Strict as H
 import Text.Regex.PCRE.Heavy (scan, re)
 
--- | Path to an object in the nix store.
-data StorePath = StorePath {
-  spStoreDir :: FilePath,
-  spObjectHash :: Text,
-  spObjectName :: Text
-  }
-  deriving (Show, Eq, Generic)
-
-instance Hashable StorePath
-
--- | Get the basename of a store path.
-spBasename :: StorePath -> FilePath
-spBasename sp = unpack $ spObjectHash sp <> "-" <> spObjectName sp
-
--- | Get the full path of a store path.
-spFullpath :: StorePath -> FilePath
-spFullpath sp = spStoreDir sp </> spBasename sp
-
--- | Parse a store path from text. Probably not super efficient but oh well.
-parseStorePath :: Text -> Either String StorePath
-parseStorePath txt = case unsnoc $ T.split (=='/') txt of
-  Nothing -> err
-  Just (intercalate "/" -> unpack -> storeDir, pathInStore) -> do
-    case scan [re|^([\w\d]{32})-(.*)|] pathInStore of
-      [(_, [hash, name])] -> Right $ StorePath storeDir hash name
-      _ -> err
-  where err = Left $ show txt <> " does not appear to be a store path"
-
-ioParseStorePath :: Text -> IO StorePath
-ioParseStorePath txt = case parseStorePath txt of
-  Left err -> error err
-  Right sp -> return sp
+import Nix.StorePath
 
 -- | A representation of a hash, which expresses the type of
 -- hash. This is encoded as a string in the form "<type>:<hash>",
@@ -118,6 +87,7 @@ text = char '"' >> loop [] where
 surround :: Char -> Char -> Parser a -> Parser a
 surround start stop p = char start *> p <* char stop
 
+-- | Parse a store path surrounded by quotes.
 quotedStorePath :: Parser StorePath
 quotedStorePath = try $ do
   fullPath <- text
