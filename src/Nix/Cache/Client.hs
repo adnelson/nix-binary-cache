@@ -7,6 +7,7 @@ import Control.Monad.Trans.Except (ExceptT)
 import Servant
 
 import Nix.Cache.API
+import Nix.Derivation (StorePath(..))
 import Nix.Cache.Types
 
 -- Make a client request returning a `t`.
@@ -30,3 +31,17 @@ nixosCacheUrl = BaseUrl {
   baseUrlPort = 443,
   baseUrlPath = ""
   }
+
+-- | A dependency tree, represented as a mapping from a store path to
+-- its set of dependent paths.
+newtype PathTree = PathTree (HashMap StorePath (HashSet StorePath))
+
+-- | Build a dependency tree given some starting store path.
+buildTree :: StorePath -> IO PathTree
+buildTree = undefined
+
+-- | Given a store path, fetch all of the NARs of the path's
+-- dependencies which are available from a cache, and put them in the
+-- nix store.
+fetchTree :: BaseUrl -> StorePath -> IO ()
+fetchTree baseUrl storePath = undefined

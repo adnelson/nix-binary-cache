@@ -103,13 +103,6 @@ instance FromKVMap NarInfo where
           _ -> Left $ show txt <> " is not a non-negative integer"
         -- | Split a text on whitespace. Derp.
         splitWS = filter (/= "") . T.split (flip elem [' ', '\t', '\n', '\r'])
-        -- | Convert a compression type string.
-        parseCompressionType "xz" = return NarXzip
-        parseCompressionType "xzip" = return NarXzip
-        parseCompressionType "bz2" = return NarBzip2
-        parseCompressionType "bzip2" = return NarBzip2
-        parseCompressionType ctype = Left (show ctype <>
-                                           " is not a known compression type.")
         parseNarReq compType txt = do
           let suf = compTypeToExt compType
           case "nar/" `T.isPrefixOf` txt of
@@ -149,6 +142,15 @@ compTypeToExt :: NarCompressionType -> Text
 compTypeToExt NarBzip2 = ".nar.bz2"
 compTypeToExt NarXzip = ".nar.xz"
 
+-- | Convert a compression type string.
+parseCompressionType :: Text -> Either String NarCompressionType
+parseCompressionType "xz" = return NarXzip
+parseCompressionType "xzip" = return NarXzip
+parseCompressionType "bz2" = return NarBzip2
+parseCompressionType "bzip2" = return NarBzip2
+parseCompressionType ctype = Left (show ctype <>
+                                   " is not a known compression type.")
+
 -- | Request for a nix archive.
 -- The first argument is some sort of key that the server provides (as
 -- a response to the .narinfo route) for how to fetch the package. The
@@ -160,7 +162,7 @@ data NarReq = NarReq Text NarCompressionType
 instance ToHttpApiData NarReq where
   toUrlPiece (NarReq path ctype) = path <> compTypeToExt ctype
 
--- | An archied nix store object.
+-- | An archived nix store object.
 newtype Nar = Nar ByteString
   deriving (Eq, Generic)
 
