@@ -14,6 +14,7 @@ let
     "bytestring"
     "base64-bytestring"
     "classy-prelude"
+    "data-default"
     "directory"
     "HsOpenSSL"
     "http-client"
@@ -23,12 +24,15 @@ let
     "http-types"
     "mtl"
     "parsec"
+    "pcre-heavy"
+    "process"
     "servant-client"
     "servant-server"
     "servant"
     "text"
     "transformers"
     "unordered-containers"
+    "unix"
     "wai"
     "wai-extra"
     "warp"
@@ -116,7 +120,7 @@ let
   dotGhci = pkgs.writeText "${pname}.ghci" (joinLines (
     map (ext: ":set -X${ext}") extensions ++
     [
-      ":set prompt \"\\ESC[34mλ> \\ESC[m\""
+      ":set prompt \"λ> \""
       "import Data.Text (Text)"
       "import qualified Servant"
       "import qualified Data.Text as T"

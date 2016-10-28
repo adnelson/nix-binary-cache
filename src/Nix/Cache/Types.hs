@@ -2,7 +2,6 @@
 -- | Types relating to a nix binary cache.
 module Nix.Cache.Types where
 
-import ClassyPrelude
 import qualified Data.ByteString as B
 import qualified Data.HashMap.Strict as H
 import qualified Data.Text as T
@@ -14,6 +13,7 @@ import Servant (MimeUnrender(..), OctetStream, ToHttpApiData(..), Accept(..),
                 Proxy(..))
 import Network.HTTP.Media ((//))
 
+import Nix.Cache.Common
 import Nix.Derivation (FileHash(..), fileHashFromText)
 
 -- | binary/octet-stream type. Same as application/octet-stream.
@@ -101,8 +101,6 @@ instance FromKVMap NarInfo where
         parseNonNegInt txt = case readMay txt of
           Just n | n >= 0 -> Right n
           _ -> Left $ show txt <> " is not a non-negative integer"
-        -- | Split a text on whitespace. Derp.
-        splitWS = filter (/= "") . T.split (flip elem [' ', '\t', '\n', '\r'])
         parseNarReq compType txt = do
           let suf = compTypeToExt compType
           case "nar/" `T.isPrefixOf` txt of
