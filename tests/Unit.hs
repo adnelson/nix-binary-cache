@@ -14,9 +14,9 @@ import System.Environment (getEnv)
 
 import Nix.Cache.Client
 import Nix.Cache.Types
-import Nix.Derivation
 import qualified Nix.Cache.Types.Tests as TypesTests
-import qualified Nix.Derivation.Tests as DerivTests
+-- import Nix.Derivation
+-- import qualified Nix.Derivation.Tests as DerivTests
 
 -- | An example store prefix that the nixos binary cache has (at present).
 exPrefix :: StorePrefix

@@ -37,8 +37,8 @@ spBasename :: StorePath -> FilePath
 spBasename (StorePath _ sbp) = sbpRender sbp
 
 -- | Get the full path of a store path.
-spFullpath :: StorePath -> FilePath
-spFullpath sp = spStoreDir sp </> spBasename sp
+spFullpath :: FilePath -> StoreBasepath -> FilePath
+spFullpath storeDir sbp = storeDir </> sbpRender sbp
 
 parseStoreBasepath :: Text -> Either String StoreBasepath
 parseStoreBasepath txt =
