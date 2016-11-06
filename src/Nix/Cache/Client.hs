@@ -43,12 +43,14 @@ nixosCacheUrl = BaseUrl {
 
 -- | A dependency tree, represented as a mapping from a store path to
 -- its set of (immediate, not transitive) dependent paths.
-newtype PathTree = PathTree (HashMap StoreBasepath [StoreBasepath])
+newtype PathTree = PathTree (HashMap StorePath [StorePath])
   deriving (Show, Eq, Generic, Monoid)
 
 instance Default PathTree where
   def = mempty
 
+-- | This function is not in all versions of the directory package, so
+-- we copy/paste the definition here.
 listDirectory :: FilePath -> IO [FilePath]
 listDirectory path = filter f <$> getDirectoryContents path
   where f filename = filename /= "." && filename /= ".."
@@ -69,13 +71,13 @@ writeCache cacheLocation (PathTree tree) = do
   -- mkdir -p cacheLocation
   createDirectoryIfMissing True cacheLocation
   forM_ (H.toList tree) $ \(path, refs) -> do
-    let pathDir = cacheLocation </> sbpRender path
+    let pathDir = cacheLocation </> spToPath path
     doesDirectoryExist pathDir >>= \case
       True -> return ()
       False -> do
         createDirectory pathDir
         forM_ refs $ \ref -> do
-          writeFile (pathDir </> sbpRender ref) ("" :: String)
+          writeFile (pathDir </> spToPath ref) ("" :: String)
 
 -- | Read a cache into memory.
 readCache :: FilePath -> IO PathTree
@@ -84,33 +86,28 @@ readCache cacheLocation = doesDirectoryExist cacheLocation >>= \case
   True -> do
     paths <- listDirectory cacheLocation
     tuples <- forM paths $ \path -> do
-      bpath <- ioParseStoreBasepath $ pack path
+      bpath <- ioParseStorePath $ pack path
       deps <- do
         depfiles <- listDirectory (cacheLocation </> path)
         forM depfiles $ \path -> do
-          ioParseStoreBasepath $ pack path
+          ioParseStorePath $ pack path
       return (bpath, deps)
     return $ PathTree $ H.fromList tuples
 
 -- | Configuration of the nix client.
 data NixClientConfig = NixClientConfig {
-  nccStoreDir :: FilePath,
+  nccStoreDir :: NixStoreDir,
   -- ^ Location of the nix store.
   nccCacheLocation :: FilePath
   -- ^ Location of the nix client path cache.
   } deriving (Show, Generic)
 
-instance Default NixClientConfig
-
 -- | State for the nix client monad.
 data NixClientState = NixClientState {
   ncsPathTree :: PathTree,
   -- ^ Computed store path dependency tree.
-  ncsSentPaths :: HashSet StoreBasepath
+  ncsSentPaths :: HashSet StorePath
   } deriving (Show, Generic)
-
-instance Default NixClientState where
-  def = NixClientState mempty mempty
 
 -- | Nix client monad.
 type NixClient = ReaderT NixClientConfig (StateT NixClientState IO)
@@ -118,20 +115,23 @@ type NixClient = ReaderT NixClientConfig (StateT NixClientState IO)
 -- | Run the nix client monad.
 runNixClient :: NixClient a -> IO a
 runNixClient action = do
-  storeDir <- getEnv "NIX_STORE"
+  storeDir <- getNixStoreDir
   home <- getEnv "HOME"
   let cfg = NixClientConfig {
         nccStoreDir = storeDir,
         nccCacheLocation = home </> ".nix-path-cache"
         }
   pathTree <- readCache $ nccCacheLocation cfg
-  let state = def {ncsPathTree = pathTree}
+  let state = NixClientState {
+        ncsPathTree = pathTree,
+        ncsSentPaths = mempty
+        }
   (result, state') <- runStateT (runReaderT action cfg) state
   writeCache (nccCacheLocation cfg) (ncsPathTree state')
   return result
 
 -- | Get references of a path, reading from a cache.
-getReferences :: StoreBasepath -> NixClient [StoreBasepath]
+getReferences :: StorePath -> NixClient [StorePath]
 getReferences spath = lookup_ spath <$> gets ncsPathTree >>= \case
   Just refs -> return refs
   Nothing -> do
@@ -143,21 +143,21 @@ getReferences spath = lookup_ spath <$> gets ncsPathTree >>= \case
     insert_ path refs (PathTree t) = PathTree $ H.insert path refs t
     -- | Get the references of an object. Looks in and updates a global
     -- cache, since references are static information.
-    getReferences' :: StoreBasepath -> NixClient [StoreBasepath]
+    getReferences' :: StorePath -> NixClient [StorePath]
     getReferences' spath = do
       storeDir <- asks nccStoreDir
-      let cmd = "nix-store --query --references " <> spFullpath storeDir spath
+      let cmd = "nix-store --query --references " <> spToFull storeDir spath
       result <- liftIO $ pack <$> readCreateProcess (shell $ unpack cmd) ""
-      forM (splitWS result) $ \line -> case parseStorePath line of
+      forM (splitWS result) $ \line -> case snd <$> parseFullStorePath line of
         Left err -> error err
-        Right (StorePath _ sbp) -> return sbp
+        Right sbp -> return sbp
 
 -- -- | Get the full dependency tree given some starting store path.
--- buildTree :: StoreBasepath -> NixClient ()
+-- buildTree :: StorePath -> NixClient ()
 -- buildTree spath = mapM_ buildTree =<< getReferences spath
 
 -- | Send a path and its full dependency set to a binary cache.
-sendClosure :: StoreBasepath -> NixClient ()
+sendClosure :: StorePath -> NixClient ()
 sendClosure spath = elem spath <$> gets ncsSentPaths >>= \case
   True -> do
     -- Already sent, nothing more to do
@@ -170,7 +170,7 @@ sendClosure spath = elem spath <$> gets ncsSentPaths >>= \case
     sendPath spath
     modify $ \s -> s {ncsSentPaths = HS.insert spath (ncsSentPaths s)}
   where
-    sendPath p = putStrLn $ "Sending " <> pack (sbpRender p)
+    sendPath p = putStrLn $ "Sending " <> pack (spToPath p)
 
 -- | Given a store path, fetch all of the NARs of the path's
 -- dependencies which are available from a cache, and put them in the
