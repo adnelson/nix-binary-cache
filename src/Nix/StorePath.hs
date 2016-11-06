@@ -2,9 +2,7 @@
 module Nix.StorePath where
 
 import ClassyPrelude hiding (try)
-import Text.Parsec
 import qualified Data.Text as T
-import qualified Data.HashMap.Strict as H
 import Text.Regex.PCRE.Heavy (scan, re)
 
 -- | The nix store directory.

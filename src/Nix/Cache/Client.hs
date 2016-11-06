@@ -1,6 +1,5 @@
 module Nix.Cache.Client where
 
-import Data.Default (Default(..))
 import Servant.Client (BaseUrl(..), client, ServantError, Scheme(..))
 import Network.HTTP.Client (Manager)
 import Control.Monad.Trans.Except (ExceptT)
@@ -44,9 +43,6 @@ nixosCacheUrl = BaseUrl {
 -- its set of (immediate, not transitive) dependent paths.
 newtype PathTree = PathTree (HashMap StoreBasepath [StoreBasepath])
   deriving (Show, Eq, Generic, Monoid)
-
-instance Default PathTree where
-  def = mempty
 
 listDirectory :: FilePath -> IO [FilePath]
 listDirectory path = filter f <$> getDirectoryContents path
