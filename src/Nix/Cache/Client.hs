@@ -172,4 +172,5 @@ sendClosure spath = do
       modifyMVar_ mv $ \s ->
         pure s {ncsSentPaths = HS.insert spath $ ncsSentPaths s}
   where
+    -- | TODO (obvi): actually implement this function
     sendPath p = putStrLn $ "Sending " <> pack (spToPath p)
