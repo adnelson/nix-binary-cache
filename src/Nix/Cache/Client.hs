@@ -5,8 +5,8 @@ import Network.HTTP.Client (Manager)
 import Control.Monad.Trans.Except (ExceptT)
 import Servant
 import System.Process (readCreateProcess, shell)
-import System.Directory (createDirectoryIfMissing, createDirectory,
-                         getDirectoryContents,
+import System.Directory (createDirectoryIfMissing,
+                         getDirectoryContents, renameDirectory,
                          doesDirectoryExist)
 import qualified Data.HashMap.Strict as H
 import qualified Data.HashSet as HS
@@ -73,9 +73,10 @@ writeCache cacheLocation (PathTree tree) = do
         -- Build the cache in a temporary directory, and then move it
         -- to the actual location. This prevents the creation of a
         -- partial directory in the case of a crash.
-        createDirectory pathDir
+        tempDir <- readCreateProcess (shell "mktemp -d") ""
         forM_ refs $ \ref -> do
-          writeFile (pathDir </> spToPath ref) ("" :: String)
+          writeFile (tempDir </> spToPath ref) ("" :: String)
+        renameDirectory tempDir pathDir
 
 -- | Read a cache into memory.
 readCache :: FilePath -> IO PathTree
@@ -145,8 +146,8 @@ getReferences' spath = do
 getReferences :: StorePath -> NixClient [StorePath]
 getReferences spath = do
   mv <- asks snd
-  modifyMVar mv $ \s@NixClientState{..} -> do
-    let PathTree t = ncsPathTree
+  modifyMVar mv $ \s -> do
+    let PathTree t = ncsPathTree s
     case lookup spath t of
       Just refs -> pure (s, refs)
       Nothing -> do
