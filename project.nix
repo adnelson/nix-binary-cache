@@ -8,15 +8,12 @@ let
   # the haskell package set, but still work as dependencies...
   dependencies = [
     "aeson"
-    "aeson-compat"
     "attoparsec"
     "base"
     "bytestring"
     "base64-bytestring"
     "classy-prelude"
-    "data-default"
     "directory"
-    "HsOpenSSL"
     "http-client"
     "http-client-openssl"
     "http-client-tls"
@@ -32,7 +29,6 @@ let
     "text"
     "transformers"
     "unordered-containers"
-    "unix"
     "wai"
     "wai-extra"
     "warp"
@@ -214,6 +210,7 @@ haskellPackages.mkDerivation rec {
 
       cp -f ${dotGhci} .ghci
       eval "${preConfigure}"
+      cabal clean
       cabal configure --enable-tests
     fi
   '';
