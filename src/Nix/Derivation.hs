@@ -20,9 +20,18 @@ data FileHash
   | RecursiveHash FileHash -- ^ Hash should be computed over a directory.
   deriving (Show, Eq, Generic)
 
+-- | Translate a file hash to text.
+fileHashToText :: FileHash -> Text
+fileHashToText = \case
+  Sha256Hash t -> "sha256:" <> t
+  Sha1Hash t -> "sha1:" <> t
+  Md5Hash t -> "md5:" <> t
+  RecursiveHash h -> "r:" <> fileHashToText h
+
 -- | Translate text into a FileHash object.
 fileHashFromText :: Text -> Either String FileHash
 fileHashFromText txt = case T.split (==':') txt of
+  "r":rest -> RecursiveHash <$> fileHashFromText (intercalate ":" rest)
   [hashtype, hash] -> getFileHashConstructor hashtype <*> pure hash
   _ -> Left $ "Not a hash string: " <> show txt
 
