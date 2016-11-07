@@ -41,6 +41,7 @@ parseFullStorePath txt = case unsnoc $ T.split (=='/') txt of
     basepath <- parseStorePath pathInStore
     return (NixStoreDir storeDir, basepath)
 
+-- | Parse a StorePath in the IO monad.
 ioParseStorePath :: Text -> IO StorePath
 ioParseStorePath txt = case parseStorePath txt of
   Left err -> error err
@@ -50,6 +51,7 @@ ioParseStorePath txt = case parseStorePath txt of
 spToFull :: NixStoreDir -> StorePath -> FilePath
 spToFull (NixStoreDir storeDir) p = storeDir </> spToPath p
 
+-- | Convert a StorePath to a FilePath.
 spToPath :: StorePath -> FilePath
 spToPath (StorePath hash name) = unpack $ hash <> "-" <> name
 

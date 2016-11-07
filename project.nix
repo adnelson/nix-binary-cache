@@ -29,6 +29,7 @@ let
     "text"
     "transformers"
     "unordered-containers"
+    "vector"
     "wai"
     "wai-extra"
     "warp"
