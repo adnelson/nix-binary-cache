@@ -9,7 +9,7 @@ import Servant
 import Servant.Common.BaseUrl (parseBaseUrl)
 import System.Process (readCreateProcess, shell)
 import System.Directory (createDirectoryIfMissing,
-                         getDirectoryContents, renameDirectory,
+                         renameDirectory,
                          doesDirectoryExist)
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.Text as T
@@ -23,6 +23,10 @@ import Nix.Cache.Common
 import Nix.Cache.API
 import Nix.StorePath
 import Nix.Cache.Types
+
+-------------------------------------------------------------------------------
+-- * Servant client
+-------------------------------------------------------------------------------
 
 -- Make a client request returning a `t`.
 type ClientReq t = Manager -> BaseUrl -> ExceptT ServantError IO t
@@ -70,11 +74,9 @@ type PathTree = HashMap StorePath [StorePath]
 -- | A set of store paths.
 type PathSet = HashSet StorePath
 
--- | This function is not in all versions of the directory package, so
--- we copy/paste the definition here.
-listDirectory :: FilePath -> IO [FilePath]
-listDirectory path = filter f <$> getDirectoryContents path
-  where f filename = filename /= "." && filename /= ".."
+-------------------------------------------------------------------------------
+-- * Local filesystem cache for path references
+-------------------------------------------------------------------------------
 
 -- | Write a path tree to the cache.
 -- Iterates through keys of the path tree, for each one creates a
@@ -126,6 +128,11 @@ readCache cacheLocation = doesDirectoryExist cacheLocation >>= \case
         depfiles <- listDirectory (cacheLocation </> path)
         mapM (ioParseStorePath . pack) depfiles
       pure (bpath, deps)
+
+
+-------------------------------------------------------------------------------
+-- * Nix client monad
+-------------------------------------------------------------------------------
 
 -- | Configuration of the nix client.
 data NixClientConfig = NixClientConfig {
@@ -211,6 +218,10 @@ clientRequest req = do
     Left err -> error $ show err
     Right result -> pure result
 
+-------------------------------------------------------------------------------
+-- * Nix client actions
+-------------------------------------------------------------------------------
+
 -- | Get the references of an object by asking the nix-store. This
 -- information is cached by the caller of this function.
 getReferences' :: StorePath -> NixClient [StorePath]
@@ -235,7 +246,6 @@ getReferences spath = do
         -- Filter out self-referential paths.
         let refs = filter (/= spath) refs'
         pure (s {ncsPathTree = H.insert spath refs t}, refs)
-
 
 -- | Given some store paths to send, find their closure and see which
 -- of those paths need to be sent to the server.
