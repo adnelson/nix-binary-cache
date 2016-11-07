@@ -1,14 +1,12 @@
 -- | Nix derivations.
 module Nix.Derivation where
 
-import ClassyPrelude
+import ClassyPrelude hiding (try)
 import Text.Parsec
 import qualified Data.Text as T
 import qualified Data.HashMap.Strict as H
 
--- | Path to an object in the nix store.
-newtype StorePath = StorePath Text
-  deriving (Show, Eq, Generic, Hashable)
+import Nix.StorePath
 
 -- | A representation of a hash, which expresses the type of
 -- hash. This is encoded as a string in the form "<type>:<hash>",
@@ -40,11 +38,6 @@ getFileHashConstructor txt = case unpack txt of
     go "md5" = return Md5Hash
     go s = Left $ "Unknown hash type: " <> show s
 
-toFullPath :: FilePath -- ^ Path to the nix store.
-           -> StorePath -- ^ Store path.
-           -> FilePath -- ^ Full path to the store object.
-toFullPath pathToStore (StorePath p) = pathToStore </> unpack p
-
 -- | The main derivation type. This represents all of the information
 -- that is needed to construct a particular store object; the store
 -- object(s) that will be built are listed in the `derivOutputs` field.
@@ -56,11 +49,12 @@ data Derivation = Derivation {
   derivInputDerivations :: HashMap StorePath [Text],
   -- ^ Derivations this derivation needs to have as inputs, and
   -- outputs of those derivations.
-  derivInputPaths :: [StorePath],
-  -- ^ Non-derivation inputs the derivation needs in order to build.
+  derivInputPaths :: [FilePath],
+  -- ^ Non-derivation inputs the derivation needs in order to build
+  -- (paths that were copied from the file system to the store)
   derivSystem :: Text,
   -- ^ System the derivation is to be built on.
-  derivBuilder :: StorePath,
+  derivBuilder :: FilePath,
   -- ^ Path to the executable to build the derivation.
   derivArgs :: [Text],
   -- ^ Arguments to the builder.
@@ -92,6 +86,14 @@ text = char '"' >> loop [] where
 surround :: Char -> Char -> Parser a -> Parser a
 surround start stop p = char start *> p <* char stop
 
+-- | Parse a store path surrounded by quotes.
+quotedStorePath :: Parser StorePath
+quotedStorePath = try $ do
+  fullPath <- text
+  case parseStorePath fullPath of
+    Left err -> fail err
+    Right sp -> return sp
+
 -- | Parse a derivation in the Parser monad.
 derivationParser :: Parser Derivation
 derivationParser = do
@@ -112,7 +114,7 @@ derivationParser = do
       parens $ do
         outName <- text
         char ','
-        outPath <- StorePath <$> text
+        outPath <- quotedStorePath
         char ','
         text >>= \case
           "" -> do
@@ -136,17 +138,18 @@ derivationParser = do
     -- [("/nix/store/abc-bar",["out"]), ("/nix/store/xyz-bux",["out","dev"])]
     inDerivs <- brackets $ sepCommas $ do
       parens $ do
-        inDName <- StorePath <$> text
+        inDName <- quotedStorePath
         char ','
         inDOutputs <- textList
         return (inDName, inDOutputs)
     -- Grab the input file list (not derivations). Just a list of
     -- strings.
-    inFiles <- char ',' >> map StorePath <$> textList
+    char ','
+    inFiles <- brackets $ map unpack text `sepBy` char ','
     -- Grab the system info string.
     system <- char ',' >> text
     -- Grab the builder executable path.
-    builder <- char ',' >> StorePath <$> text
+    builder <- char ',' >> map unpack text
     -- Grab the builder arguments.
     builderArgs <- char ',' >> textList
     -- Grab the build environment, a list of 2-tuples.

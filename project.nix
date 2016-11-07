@@ -8,14 +8,12 @@ let
   # the haskell package set, but still work as dependencies...
   dependencies = [
     "aeson"
-    "aeson-compat"
     "attoparsec"
     "base"
     "bytestring"
     "base64-bytestring"
     "classy-prelude"
     "directory"
-    "HsOpenSSL"
     "http-client"
     "http-client-openssl"
     "http-client-tls"
@@ -23,6 +21,8 @@ let
     "http-types"
     "mtl"
     "parsec"
+    "pcre-heavy"
+    "process"
     "servant-client"
     "servant-server"
     "servant"
@@ -116,7 +116,7 @@ let
   dotGhci = pkgs.writeText "${pname}.ghci" (joinLines (
     map (ext: ":set -X${ext}") extensions ++
     [
-      ":set prompt \"\\ESC[34mλ> \\ESC[m\""
+      ":set prompt \"λ> \""
       "import Data.Text (Text)"
       "import qualified Servant"
       "import qualified Data.Text as T"
@@ -210,6 +210,7 @@ haskellPackages.mkDerivation rec {
 
       cp -f ${dotGhci} .ghci
       eval "${preConfigure}"
+      cabal clean
       cabal configure --enable-tests
     fi
   '';
