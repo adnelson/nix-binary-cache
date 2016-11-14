@@ -8,6 +8,7 @@ let
   # the haskell package set, but still work as dependencies...
   dependencies = [
     "aeson"
+    "async"
     "attoparsec"
     "base"
     "bytestring"

@@ -18,6 +18,7 @@ import qualified Data.HashMap.Strict as H
 import qualified Data.HashSet as HS
 import qualified Data.Vector as V
 import System.Environment (getEnv, lookupEnv)
+import Control.Concurrent.Async (wait)
 
 import Nix.Cache.Common
 import Nix.Cache.API
@@ -137,6 +138,9 @@ readCache cacheLocation = doesDirectoryExist cacheLocation >>= \case
 -- * Nix client monad
 -------------------------------------------------------------------------------
 
+-- Represents the state of a file transfer.
+data TransferStatus = Sending | Sent deriving (Show, Eq)
+
 -- | Configuration of the nix client.
 data NixClientConfig = NixClientConfig {
   nccStoreDir :: NixStoreDir,
@@ -153,16 +157,20 @@ data NixClientConfig = NixClientConfig {
 data NixClientState = NixClientState {
   ncsPathTree :: PathTree,
   -- ^ Computed store path dependency tree.
-  ncsSentPaths :: PathSet
-  -- ^ Paths that have already been sent to the nix store.
-  } deriving (Show, Generic)
+  ncsSentPaths :: HashMap StorePath (Async ()) --  TransferStatus
+  -- ^ Paths that are being sent or have already been sent to the nix store.
+  } deriving (Generic)
 
 -- | Object read by the nix client reader.
 data NixClientObj = NixClientObj {
   ncoConfig :: NixClientConfig,
+  -- ^ Static configuration of the client.
   ncoState :: MVar NixClientState,
+  -- ^ Mutable state of the client.
   ncoManager :: Manager,
+  -- ^ HTTP connection manager client uses to connect.
   ncoLogMutex :: MVar ()
+  -- ^ Syncronizes logs of the client so they don't overlap.
   }
 
 -- | Nix client monad.
@@ -282,49 +290,53 @@ getReferences spath = do
         let refs = filter (/= spath) refs'
         pure (s {ncsPathTree = H.insert spath refs t}, refs)
 
--- | Get the full reference closure of a list of paths.
-getReferenceClosure :: PathSet -> [StorePath] -> NixClient PathSet
-getReferenceClosure seen = \case
-  [] -> return seen
-  path:paths -> case elem path seen of
-    True -> getReferenceClosure seen paths
-    False -> do
-      refs <- getReferences path
-      getReferenceClosure (HS.insert path seen) (paths <> refs)
-
 -- | Given some store paths to send, find their closure and see which
 -- of those paths need to be sent to the server.
 queryStorePaths :: [StorePath] -- ^ Top-level store paths to send.
                 -> NixClient PathSet -- ^ Store paths that need to be sent.
 queryStorePaths paths = do
-  pathsToSend <- getReferenceClosure mempty paths
+  pathsToSend <- newMVar mempty
+  -- Define a recursive function which will concurrently fetch a
+  -- dependency tree of a list of paths.
+  let loop _paths = mapConcurrently getRefs _paths >> return ()
+      getRefs path = unlessM (elem path <$> readMVar pathsToSend) $ do
+        modifyMVar_ pathsToSend $ pure . HS.insert path
+        loop =<< getReferences path
+  -- Call the loop on the input path list.
+  loop paths
+  pathList <- HS.toList <$> readMVar pathsToSend
   storeDir <- nccStoreDir . ncoConfig <$> ask
-  let pathsV = V.fromList $ map (spToFull storeDir) $ HS.toList pathsToSend
+  -- Convert the path list to full paths and convert that to a vector.
+  let pathsV = V.fromList $ map (spToFull storeDir) pathList
+  -- Now that we have the full list built up, send it to the
+  -- server to see which paths are already there.
   result <- clientRequest $ queryPaths pathsV
   -- Each of the keys for which the value is False are not on the server.
+  -- In addition, we filter out any paths that we fail to parse.
   let spaths = flip map (H.keys $ H.filter not result) $ \path -> do
         case parseFullStorePath $ pack path of
           Right (_, spath) -> Just spath
           Left _ -> Nothing
+  -- Convert the not-found paths to a set and return it.
   pure $ HS.fromList $ catMaybes spaths
 
 -- | Send a path and its full dependency set to a binary cache.
 sendClosure :: StorePath -> NixClient ()
 sendClosure spath = do
   mv <- asks ncoState
-  elem spath <$> ncsSentPaths <$> readMVar mv >>= \case
-    True -> do
-      -- Already sent, nothing more to do
+  H.lookup spath <$> ncsSentPaths <$> readMVar mv >>= \case
+    Just _ -> do
+      -- Sending or already sent, nothing more to do
       pure ()
-    False -> do
-      -- Not sent yet.
-      refs <- getReferences spath
-      -- Concurrently send parent paths.
-      mapConcurrently sendClosure refs
-      -- Once parents are sent, send the path itself.
-      sendPath spath
-      modifyMVar_ mv $ \s ->
-        pure s {ncsSentPaths = HS.insert spath $ ncsSentPaths s}
+    Nothing -> modifyMVar_ mv $ \s -> do
+      action <- async $ do
+        refs <- getReferences spath
+        -- Concurrently send parent paths.
+        mapConcurrently sendClosure refs
+        -- Once parents are sent, send the path itself.
+        sendPath spath
+      pure s {ncsSentPaths = H.insert spath action $ ncsSentPaths s}
+  mapM_ (liftIO . wait) =<< map ncsSentPaths (readMVar mv)
   where
     -- | TODO (obvi): actually implement this function
     sendPath p = ncInfo $ "Sending " <> pack (spToPath p)
