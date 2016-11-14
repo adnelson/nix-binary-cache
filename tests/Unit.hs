@@ -15,6 +15,7 @@ import System.Environment (getEnv)
 import Nix.Cache.Client
 import Nix.Cache.Types
 import qualified Nix.Cache.Types.Tests as TypesTests
+import qualified Data.KVMap.Tests as KVMapTests
 -- import Nix.Derivation
 -- import qualified Nix.Derivation.Tests as DerivTests
 
@@ -75,5 +76,5 @@ runNixos = run Nothing nixosCacheUrl
 main :: IO ()
 main = hspec $ do
   TypesTests.nixCacheInfoSpec
-  TypesTests.kvMapSpec
+  KVMapTests.kvMapSpec
   TypesTests.fileHashSpec

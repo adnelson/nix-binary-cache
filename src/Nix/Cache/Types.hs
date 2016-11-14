@@ -3,6 +3,7 @@
 module Nix.Cache.Types where
 
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.HashMap.Strict as H
 import qualified Data.Text as T
 import Data.Attoparsec.ByteString.Char8 (char, notChar, space, endOfLine,
@@ -13,6 +14,7 @@ import Servant (MimeUnrender(..), OctetStream, ToHttpApiData(..), Accept(..),
                 Proxy(..))
 import Network.HTTP.Media ((//))
 
+import Data.KVMap
 import Nix.Cache.Common
 import Nix.Derivation (FileHash(..), fileHashFromText)
 
@@ -27,15 +29,6 @@ instance Accept BOctetStream where
 instance MimeUnrender OctetStream t =>
          MimeUnrender BOctetStream t where
   mimeUnrender _ = mimeUnrender (Proxy :: Proxy OctetStream)
-
--- | Some nix cache information comes in a line-separated "Key: Value"
--- format. Here we represent that as a map.
-newtype KVMap = KVMap (HashMap Text Text)
-  deriving (Show, Eq, Generic)
-
--- | Class for things which can be represented in KVMaps.
-class FromKVMap t where
-  fromKVMap :: KVMap -> Either String t
 
 -- | Information about a nix binary cache. This information is served
 -- on the /nix-cache-info route.
@@ -86,7 +79,7 @@ data NarInfo = NarInfo {
   narSize :: Int, -- ^ Size of the nix archive.
   fileSize :: Int, -- ^ Size of the uncompressed store object.
   fileHash :: FileHash, -- ^ Hash of the uncompressed store object.
-  narReq :: NarReq, -- ^ How to request this NAR.
+  narReq :: NarRequest, -- ^ How to request this NAR.
   compression :: NarCompressionType, -- ^ How this NAR is compressed.
   references :: [FilePath], -- ^ Other store objects this references.
   deriver :: Maybe FilePath, -- ^ The derivation file for this object.
@@ -101,7 +94,7 @@ instance FromKVMap NarInfo where
         parseNonNegInt txt = case readMay txt of
           Just n | n >= 0 -> Right n
           _ -> Left $ show txt <> " is not a non-negative integer"
-        parseNarReq compType txt = do
+        parseNarRequest compType txt = do
           let suf = compTypeToExt compType
           case "nar/" `T.isPrefixOf` txt of
             False -> Left "Expected nar req to start with 'nar/'"
@@ -109,7 +102,7 @@ instance FromKVMap NarInfo where
               False -> Left $ "Expected nar req to end with " <> show suf
               True -> do
                 let narPath = T.drop 4 $ T.dropEnd (length suf) txt
-                return $ NarReq narPath compType
+                return $ NarRequest narPath compType
 
     storePath <- T.unpack <$> lookupE "StorePath"
     narHash <- lookupE "NarHash" >>= fileHashFromText
@@ -117,7 +110,7 @@ instance FromKVMap NarInfo where
     fileSize <- lookupE "FileSize" >>= parseNonNegInt
     fileHash <- lookupE "FileHash" >>= fileHashFromText
     compression <- lookupE "Compression" >>= parseCompressionType
-    narReq <-  lookupE "URL" >>= parseNarReq compression
+    narReq <-  lookupE "URL" >>= parseNarRequest compression
     let references = case lookup "References" kvm of
           Nothing -> []
           Just refs -> map T.unpack $ splitWS refs
@@ -142,23 +135,23 @@ compTypeToExt NarXzip = ".nar.xz"
 
 -- | Convert a compression type string.
 parseCompressionType :: Text -> Either String NarCompressionType
-parseCompressionType "xz" = return NarXzip
-parseCompressionType "xzip" = return NarXzip
-parseCompressionType "bz2" = return NarBzip2
-parseCompressionType "bzip2" = return NarBzip2
-parseCompressionType ctype = Left (show ctype <>
-                                   " is not a known compression type.")
+parseCompressionType = \case
+  "xz" -> return NarXzip
+  "xzip" -> return NarXzip
+  "bz2" -> return NarBzip2
+  "bzip2" -> return NarBzip2
+  ctype -> Left (show ctype <> " is not a known compression type.")
 
 -- | Request for a nix archive.
 -- The first argument is some sort of key that the server provides (as
 -- a response to the .narinfo route) for how to fetch the package. The
 -- second argument is the compression type.
-data NarReq = NarReq Text NarCompressionType
+data NarRequest = NarRequest Text NarCompressionType
   deriving (Show, Eq, Generic)
 
 -- | Store prefixes are used to request NAR information.
-instance ToHttpApiData NarReq where
-  toUrlPiece (NarReq path ctype) = path <> compTypeToExt ctype
+instance ToHttpApiData NarRequest where
+  toUrlPiece (NarRequest key ctype) = key <> compTypeToExt ctype
 
 -- | An archived nix store object.
 newtype Nar = Nar ByteString
@@ -171,15 +164,3 @@ instance Show Nar where
 -- | In the future, we could do validation on this.
 instance MimeUnrender OctetStream Nar where
   mimeUnrender _ = return . Nar . toStrict
-
--- | KVMaps can be parsed from text.
-parseKVMap :: Parser KVMap
-parseKVMap = do
-  many $ endOfLine <|> (space >> return ())
-  keysVals <- many $ do
-    key <- many1 $ notChar ':'
-    char ':' >> many space
-    val <- many1 $ notChar '\n'
-    many $ endOfLine <|> (space >> return ())
-    return (T.pack key, T.pack val)
-  return $ KVMap $ H.fromList keysVals
