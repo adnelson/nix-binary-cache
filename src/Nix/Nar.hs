@@ -5,14 +5,12 @@ import ClassyPrelude
 import qualified Data.ByteString as B
 import System.Process hiding (readCreateProcess)
 import System.Exit (ExitCode(..))
-import Control.Concurrent (forkIO)
-import qualified Control.Exception as C
-import Servant (MimeUnrender(..), OctetStream) -- ToHttpApiData(..),
+import Servant (MimeUnrender(..), OctetStream, ToHttpApiData(..),
+                MimeRender(..))
                 -- Accept(..),
                 -- Proxy(..))
 
 import Nix.StorePath (NixStoreDir(..), StorePath(..), spToFull)
-import GHC.IO.Exception (IOException(..))
 
 -- | An archived nix store object.
 newtype Nar = Nar ByteString
@@ -35,3 +33,8 @@ getNar nsdir spath = do
   waitForProcess handle >>= \case
     ExitFailure code -> error $ cmd <> " failed with " <> show code
     ExitSuccess -> Nar <$> B.hGetContents stdout
+
+-- instance ToHttpApiData Nar where
+--   toUrlPiece (
+instance MimeRender OctetStream Nar where
+  mimeRender _ (Nar bytes) = fromChunks [bytes]

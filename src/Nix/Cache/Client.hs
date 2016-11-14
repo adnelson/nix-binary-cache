@@ -37,10 +37,12 @@ nixCacheInfo :: ClientReq NixCacheInfo
 narInfo :: NarInfoReq -> ClientReq NarInfo
 nar :: NarRequest -> ClientReq Nar
 queryPaths :: Vector FilePath -> ClientReq (HashMap FilePath Bool)
+sendNar :: Nar -> ClientReq StorePath
 nixCacheInfo
   :<|> narInfo
   :<|> nar
-  :<|> queryPaths = client (Proxy :: Proxy NixCacheAPI)
+  :<|> queryPaths
+  :<|> sendNar = client (Proxy :: Proxy NixCacheAPI)
 
 -- | Base URL of the nixos cache.
 nixosCacheUrl :: BaseUrl
@@ -159,7 +161,8 @@ data NixClientState = NixClientState {
 data NixClientObj = NixClientObj {
   ncoConfig :: NixClientConfig,
   ncoState :: MVar NixClientState,
-  ncoManager :: Manager
+  ncoManager :: Manager,
+  ncoLogMutex :: MVar ()
   }
 
 -- | Nix client monad.
@@ -182,10 +185,41 @@ runNixClient action = do
   pathTree <- readCache $ nccCacheLocation cfg
   let state = NixClientState { ncsPathTree = pathTree, ncsSentPaths = mempty }
   stateMVar <- newMVar state
-  let obj = NixClientObj cfg stateMVar manager
+  logMVar <- newMVar ()
+  let obj = NixClientObj cfg stateMVar manager logMVar
   -- Perform the action and then update the cache.
   result <- runReaderT (action <* writeCache) obj
   pure result
+
+-------------------------------------------------------------------------------
+-- * Nix client logging
+-------------------------------------------------------------------------------
+
+type LogLevel = Int
+
+-- | Logger. Writes to stdout and ignores level for now. Writes are mutexed.
+ncLog :: LogLevel -> Text -> NixClient ()
+ncLog _ message = do
+  logmv <- ncoLogMutex <$> ask
+  takeMVar logmv
+  putStrLn message
+  putMVar logmv ()
+
+ncDebug :: Text -> NixClient ()
+ncDebug = ncLog 15
+
+ncInfo :: Text -> NixClient ()
+ncInfo = ncLog 30
+
+ncWarn :: Text -> NixClient ()
+ncWarn = ncLog 45
+
+ncFatal :: Text -> NixClient ()
+ncFatal = ncLog 60
+
+-------------------------------------------------------------------------------
+-- * Nix client HTTP configuration and interaction
+-------------------------------------------------------------------------------
 
 -- | Given some configuration, create the request manager.
 mkManager :: NixClientConfig -> IO Manager
@@ -248,26 +282,24 @@ getReferences spath = do
         let refs = filter (/= spath) refs'
         pure (s {ncsPathTree = H.insert spath refs t}, refs)
 
+-- | Get the full reference closure of a list of paths.
+getReferenceClosure :: PathSet -> [StorePath] -> NixClient PathSet
+getReferenceClosure seen = \case
+  [] -> return seen
+  path:paths -> case elem path seen of
+    True -> getReferenceClosure seen paths
+    False -> do
+      refs <- getReferences path
+      getReferenceClosure (HS.insert path seen) (paths <> refs)
+
 -- | Given some store paths to send, find their closure and see which
 -- of those paths need to be sent to the server.
 queryStorePaths :: [StorePath] -- ^ Top-level store paths to send.
                 -> NixClient PathSet -- ^ Store paths that need to be sent.
 queryStorePaths paths = do
-  pathsToSend <- newMVar mempty
-  -- A loop which will calculate the full dependency closure.
-  let loop :: [StorePath] -> NixClient ()
-      loop _paths = do
-        flip mapConcurrently _paths $ \path -> do
-          unlessM (elem path <$> readMVar pathsToSend) $ do
-            loop =<< getReferences path
-            modifyMVar_ pathsToSend $ pure . HS.insert path
-        return ()
-  loop paths
+  pathsToSend <- getReferenceClosure mempty paths
   storeDir <- nccStoreDir . ncoConfig <$> ask
-  pathList <- HS.toList <$> readMVar pathsToSend
-  let pathsV = V.fromList $ map (spToFull storeDir) pathList
-  -- Now that we have the full list built up, send it to the
-  -- server to see which paths are already there.
+  let pathsV = V.fromList $ map (spToFull storeDir) $ HS.toList pathsToSend
   result <- clientRequest $ queryPaths pathsV
   -- Each of the keys for which the value is False are not on the server.
   let spaths = flip map (H.keys $ H.filter not result) $ \path -> do
@@ -295,4 +327,4 @@ sendClosure spath = do
         pure s {ncsSentPaths = HS.insert spath $ ncsSentPaths s}
   where
     -- | TODO (obvi): actually implement this function
-    sendPath p = putStrLn $ "Sending " <> pack (spToPath p)
+    sendPath p = ncInfo $ "Sending " <> pack (spToPath p)

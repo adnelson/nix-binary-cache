@@ -4,6 +4,7 @@ import ClassyPrelude (Vector, FilePath, HashMap, Bool)
 import Servant
 
 import Nix.Nar
+import Nix.StorePath
 import Nix.Cache.Types
 
 -- | Due to AWS S3, we have to support a bogus 'binary/octet-stream'
@@ -17,3 +18,5 @@ type NixCacheAPI = "nix-cache-info" :> Get OStream NixCacheInfo
               :<|> "nar" :> Capture "nar" NarRequest :> Get OStream Nar
               :<|> "query-paths" :> ReqBody '[JSON] (Vector FilePath)
                                  :> Get '[JSON] (HashMap FilePath Bool)
+              :<|> "import-path" :> ReqBody '[OctetStream] Nar
+                                 :> Post OStream StorePath
