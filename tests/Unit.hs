@@ -12,6 +12,7 @@ import Control.Monad.Trans.Except (runExceptT)
 import Servant.Client
 import System.Environment (getEnv)
 
+import Nix.StorePath
 import Nix.Cache.Client
 import Nix.Cache.Types
 import qualified Nix.Cache.Types.Tests as TypesTests
@@ -24,8 +25,8 @@ exPrefix :: StorePrefix
 exPrefix = StorePrefix "8nm7vp5zw2lq3y2bvmq4yjnn2qgcm9rq"
 
 -- | An example nar req that the nixos cache has (at present).
-exNarReq :: NarReq
-exNarReq = NarReq hash NarXzip
+exNarReq :: NarRequest
+exNarReq = NarRequest hash NarXzip
   where hash = "11wzap2jfs9pfp4qxff2rqw1bq1cxwd297rf55sf3hq2hb0prwkv"
 
 -- | Username/password

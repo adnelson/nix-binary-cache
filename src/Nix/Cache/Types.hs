@@ -2,13 +2,8 @@
 -- | Types relating to a nix binary cache.
 module Nix.Cache.Types where
 
-import qualified Data.ByteString as B
-import qualified Data.ByteString.Lazy as BL
-import qualified Data.HashMap.Strict as H
 import qualified Data.Text as T
-import Data.Attoparsec.ByteString.Char8 (char, notChar, space, endOfLine,
-                                         many1)
-import Data.Attoparsec.ByteString.Lazy (Result(..), Parser, parse)
+import Data.Attoparsec.ByteString.Lazy (Result(..), parse)
 import Data.Aeson (ToJSON, FromJSON)
 import Servant (MimeUnrender(..), OctetStream, ToHttpApiData(..), Accept(..),
                 Proxy(..))
@@ -18,7 +13,8 @@ import Data.KVMap
 import Nix.Cache.Common
 import Nix.Derivation (FileHash(..), fileHashFromText)
 
--- | binary/octet-stream type. Same as application/octet-stream.
+-- | Type to represent the binary/octet-stream content type, which is
+-- equivalent to application/octet-stream.
 data BOctetStream
 
 instance Accept BOctetStream where
@@ -152,15 +148,3 @@ data NarRequest = NarRequest Text NarCompressionType
 -- | Store prefixes are used to request NAR information.
 instance ToHttpApiData NarRequest where
   toUrlPiece (NarRequest key ctype) = key <> compTypeToExt ctype
-
--- | An archived nix store object.
-newtype Nar = Nar ByteString
-  deriving (Eq, Generic)
-
--- | Make a custom show instance so that we don't dump binary data to screen.
-instance Show Nar where
-  show (Nar bs) = "Nix archive, " <> show (B.length bs) <> " bytes"
-
--- | In the future, we could do validation on this.
-instance MimeUnrender OctetStream Nar where
-  mimeUnrender _ = return . Nar . toStrict

@@ -23,6 +23,7 @@ import Nix.Cache.Common
 import Nix.Cache.API
 import Nix.StorePath
 import Nix.Cache.Types
+import Nix.Nar
 
 -------------------------------------------------------------------------------
 -- * Servant client
@@ -34,7 +35,7 @@ type ClientReq t = Manager -> BaseUrl -> ExceptT ServantError IO t
 -- | Define the client by pattern matching.
 nixCacheInfo :: ClientReq NixCacheInfo
 narInfo :: NarInfoReq -> ClientReq NarInfo
-nar :: NarReq -> ClientReq Nar
+nar :: NarRequest -> ClientReq Nar
 queryPaths :: Vector FilePath -> ClientReq (HashMap FilePath Bool)
 nixCacheInfo
   :<|> narInfo
