@@ -18,7 +18,7 @@ import qualified Data.HashMap.Strict as H
 import qualified Data.HashSet as HS
 import qualified Data.Vector as V
 import System.Environment (getEnv, lookupEnv)
-import Control.Concurrent.Async (wait)
+import Control.Concurrent.Async.Lifted (wait)
 
 import Nix.Cache.Common
 import Nix.Cache.API
@@ -332,11 +332,12 @@ sendClosure spath = do
       action <- async $ do
         refs <- getReferences spath
         -- Concurrently send parent paths.
-        mapConcurrently sendClosure refs
+        asyncs <- mapM sendClosure refs
+        mapM_ wait _what
         -- Once parents are sent, send the path itself.
         sendPath spath
       pure s {ncsSentPaths = H.insert spath action $ ncsSentPaths s}
-  mapM_ (liftIO . wait) =<< map ncsSentPaths (readMVar mv)
+  mapM_ wait =<< map ncsSentPaths (readMVar mv)
   where
     -- | TODO (obvi): actually implement this function
     sendPath p = ncInfo $ "Sending " <> pack (spToPath p)
