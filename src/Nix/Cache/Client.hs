@@ -321,23 +321,22 @@ queryStorePaths paths = do
   pure $ HS.fromList $ catMaybes spaths
 
 -- | Send a path and its full dependency set to a binary cache.
-sendClosure :: StorePath -> NixClient ()
+sendClosure :: StorePath -> NixClient (Async ())
 sendClosure spath = do
   mv <- asks ncoState
   H.lookup spath <$> ncsSentPaths <$> readMVar mv >>= \case
-    Just _ -> do
-      -- Sending or already sent, nothing more to do
-      pure ()
-    Nothing -> modifyMVar_ mv $ \s -> do
+    Just action -> return action
+    Nothing -> do
       action <- async $ do
         refs <- getReferences spath
         -- Concurrently send parent paths.
         asyncs <- mapM sendClosure refs
-        mapM_ wait _what
+        mapM_ wait asyncs
         -- Once parents are sent, send the path itself.
         sendPath spath
-      pure s {ncsSentPaths = H.insert spath action $ ncsSentPaths s}
-  mapM_ wait =<< map ncsSentPaths (readMVar mv)
+      modifyMVar_ mv $ \s -> do
+        pure s {ncsSentPaths = H.insert spath action $ ncsSentPaths s}
+      return action
   where
     -- | TODO (obvi): actually implement this function
     sendPath p = ncInfo $ "Sending " <> pack (spToPath p)
