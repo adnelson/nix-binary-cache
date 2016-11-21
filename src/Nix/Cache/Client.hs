@@ -138,9 +138,6 @@ readCache cacheLocation = doesDirectoryExist cacheLocation >>= \case
 -- * Nix client monad
 -------------------------------------------------------------------------------
 
--- Represents the state of a file transfer.
-data TransferStatus = Sending | Sent deriving (Show, Eq)
-
 -- | Configuration of the nix client.
 data NixClientConfig = NixClientConfig {
   nccStoreDir :: NixStoreDir,
@@ -157,8 +154,10 @@ data NixClientConfig = NixClientConfig {
 data NixClientState = NixClientState {
   ncsPathTree :: PathTree,
   -- ^ Computed store path dependency tree.
-  ncsSentPaths :: HashMap StorePath (Async ()) --  TransferStatus
-  -- ^ Paths that are being sent or have already been sent to the nix store.
+  ncsSentPaths :: HashMap StorePath (Async ()),
+  -- ^ Mapping of store paths to asynchronous actions which send those paths.
+  ncsConcurrentSends :: Int
+  -- ^ Number of concurrent sending actions running.
   } deriving (Generic)
 
 -- | Object read by the nix client reader.
@@ -191,7 +190,9 @@ runNixClient action = do
         }
   manager <- mkManager cfg
   pathTree <- readCache $ nccCacheLocation cfg
-  let state = NixClientState { ncsPathTree = pathTree, ncsSentPaths = mempty }
+  let state = NixClientState { ncsPathTree = pathTree
+                             , ncsSentPaths = mempty
+                             , ncsConcurrentSends = 0}
   stateMVar <- newMVar state
   logMVar <- newMVar ()
   let obj = NixClientObj cfg stateMVar manager logMVar
@@ -323,20 +324,28 @@ queryStorePaths paths = do
 -- | Send a path and its full dependency set to a binary cache.
 sendClosure :: StorePath -> NixClient (Async ())
 sendClosure spath = do
-  mv <- asks ncoState
-  H.lookup spath <$> ncsSentPaths <$> readMVar mv >>= \case
-    Just action -> return action
-    Nothing -> do
-      action <- async $ do
+  state <- asks ncoState
+  let modConcurrents f = modifyMVar_ state $ \s ->
+        pure s {ncsConcurrentSends = f (ncsConcurrentSends s)}
+      sendPath p = do
+        c <- ncsConcurrentSends <$> readMVar state
+        storeDir <- nccStoreDir . ncoConfig <$> ask
+        let fullP = spToFull storeDir p
+        ncInfo $ "Sending " <> pack (spToPath p) <> " (" <> tshow c <> ")"
+        -- Mimic "sending" the file by reading it a bunch of times.
+        replicateM_ 20 $ (readFile fullP :: NixClient ByteString) >> pure ()
+      sendAction spath = do
+        modConcurrents (+1)
         refs <- getReferences spath
         -- Concurrently send parent paths.
-        asyncs <- mapM sendClosure refs
-        mapM_ wait asyncs
+        mapM sendClosure refs >>= mapM_ wait
         -- Once parents are sent, send the path itself.
         sendPath spath
-      modifyMVar_ mv $ \s -> do
-        pure s {ncsSentPaths = H.insert spath action $ ncsSentPaths s}
-      return action
-  where
-    -- | TODO (obvi): actually implement this function
-    sendPath p = ncInfo $ "Sending " <> pack (spToPath p)
+        modConcurrents (\c -> c - 1)
+  modifyMVar state $ \s -> do
+    case H.lookup spath $ ncsSentPaths s of
+      Just action -> return (s, action)
+      Nothing -> do
+        action <- async $ sendAction spath
+        let s' = s {ncsSentPaths = H.insert spath action $ ncsSentPaths s}
+        return (s', action)

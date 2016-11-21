@@ -40,6 +40,7 @@ let
   testDependencies = [
     "QuickCheck"
     "hspec"
+    "microtimer"
   ];
 
   # Names of extensions that the library uses.
@@ -123,6 +124,9 @@ let
       "import qualified Servant"
       "import qualified Data.Text as T"
       "import qualified Data.Text.Encoding as T"
+      "import ClassyPrelude"
+      "import System.Microtimer"
+      "import Control.Concurrent.Async.Lifted"
       ""
     ]
   ));
