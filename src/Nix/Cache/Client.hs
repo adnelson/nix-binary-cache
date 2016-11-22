@@ -158,10 +158,8 @@ data NixClientConfig = NixClientConfig {
 data NixClientState = NixClientState {
   ncsPathTree :: PathTree,
   -- ^ Computed store path dependency tree.
-  ncsSentPaths :: HashMap StorePath (Async ()),
+  ncsSentPaths :: HashMap StorePath (Async ())
   -- ^ Mapping of store paths to asynchronous actions which send those paths.
-  ncsConcurrentSends :: Int
-  -- ^ Number of concurrent sending actions running.
   } deriving (Generic)
 
 -- | Object read by the nix client reader.
@@ -203,7 +201,7 @@ runNixClient action = do
         }
   manager <- mkManager cfg
   pathTree <- readCache $ nccCacheLocation cfg
-  let state = NixClientState pathTree mempty 0
+  let state = NixClientState pathTree mempty
   stateMVar <- newMVar state
   logMVar <- newMVar ()
   -- TODO make this configurable
@@ -361,13 +359,15 @@ sendClosure spath = do
 -- | Send a single path to a nix repo.
 sendPath :: StorePath -> NixClient ()
 sendPath p = do
-  let tp = pack $ spToPath p
-  sem <- ncoSemaphore <$> ask
-  waitQSem sem
-  storeDir <- nccStoreDir . ncoConfig <$> ask
+  -- Acquire a resource from our semaphore.
+  waitQSem =<< asks ncoSemaphore
   ncDebug $ "Getting nar data for " <> tp <> "..."
+  storeDir <- nccStoreDir . ncoConfig <$> ask
   nar <- liftIO $ getNar storeDir p
   ncInfo $ "Sending " <> tp
   clientRequest $ sendNar nar
   ncDebug $ "Finished sending " <> tp
-  signalQSem sem
+  -- Release the resource to the semaphore.
+  signalQSem =<< asks ncoSemaphore
+  where
+    tp = pack $ spToPath p
