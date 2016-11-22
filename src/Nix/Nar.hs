@@ -1,14 +1,14 @@
 -- | Nix store archives.
 module Nix.Nar (
   Nar, -- Abstract
+  NixBinDir(..),
   getNar, getNixBinDir
   ) where
 
 import ClassyPrelude
 import qualified Data.ByteString as B
 import System.Exit (ExitCode(..))
-import Servant (MimeUnrender(..), OctetStream, ToHttpApiData(..),
-                MimeRender(..))
+import Servant (MimeUnrender(..), OctetStream, MimeRender(..))
 import System.Process (readCreateProcess, shell)
 import System.Process.ByteString (readProcessWithExitCode)
 import System.FilePath (takeDirectory)
@@ -29,26 +29,29 @@ instance Show Nar where
 instance MimeUnrender OctetStream Nar where
   mimeUnrender _ = return . Nar . toStrict
 
+-- | Path to the directory containing nix binaries.
+newtype NixBinDir = NixBinDir FilePath deriving (Show, Eq, IsString)
+
 -- | Get the nix binary directory path, e.g. where `nix-store` lives.
-getNixBinDir :: IO FilePath
+getNixBinDir :: IO NixBinDir
 getNixBinDir = lookupEnv "NIX_BIN_DIR" >>= \case
   Just dir -> doesFileExist (dir </> "nix-store") >>= \case
-    True -> pure dir
+    True -> pure $ NixBinDir dir
     False -> findit
   Nothing -> findit
   where
-    whichNixStore = shell "which nix-store"
-    findit = takeDirectory <$> readCreateProcess whichNixStore ""
+    cmd = shell "which nix-store"
+    findit = NixBinDir . takeDirectory <$> readCreateProcess cmd ""
 
 -- | Ask nix for an archive of a store object.
-getNar :: FilePath -> NixStoreDir -> StorePath -> IO Nar
-getNar nixBin nsdir spath = do
+getNar :: NixBinDir -> NixStoreDir -> StorePath -> IO Nar
+getNar (NixBinDir nixBin) nsdir spath = do
   let nix_store = nixBin </> "nix-store"
       args = ["--export", spToFull nsdir spath]
-      cmd = nix_store <> intercalate " " args
   readProcessWithExitCode nix_store args "" >>= \case
     (ExitSuccess, stdout, _) -> pure $ Nar stdout
     (ExitFailure code, _, _) -> error $ cmd <> " failed with " <> show code
+      where cmd = nix_store <> intercalate " " args
 
 -- instance ToHttpApiData Nar where
 --   toUrlPiece (

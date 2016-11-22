@@ -73,13 +73,6 @@ authFromEnv = do
 nixCacheUrlFromEnv :: IO BaseUrl
 nixCacheUrlFromEnv = getEnv "NIX_REPO_HTTP" >>= parseBaseUrl
 
--- | A dependency tree, represented as a mapping from a store path to
--- its set of (immediate, not transitive) dependent paths.
-type PathTree = HashMap StorePath [StorePath]
-
--- | A set of store paths.
-type PathSet = HashSet StorePath
-
 -------------------------------------------------------------------------------
 -- * Local filesystem cache for path references
 -------------------------------------------------------------------------------
@@ -144,7 +137,7 @@ readCache cacheLocation = doesDirectoryExist cacheLocation >>= \case
 data NixClientConfig = NixClientConfig {
   nccStoreDir :: NixStoreDir,
   -- ^ Location of the nix store.
-  nccBinDir :: FilePath,
+  nccBinDir :: NixBinDir,
   -- ^ Location of nix binaries.
   nccCacheLocation :: FilePath,
   -- ^ Location of the nix client path cache.
@@ -292,6 +285,7 @@ clientRequest req = do
 -- information is cached by the caller of this function.
 getReferences' :: StorePath -> NixClient [StorePath]
 getReferences' spath = do
+  ncInfo $ "Querying nix-store for references of " <> abbrevSP spath
   storeDir <- nccStoreDir <$> ncoConfig <$> ask
   let cmd = "nix-store --query --references " <> spToFull storeDir spath
   result <- liftIO $ pack <$> readCreateProcess (shell $ unpack cmd) ""

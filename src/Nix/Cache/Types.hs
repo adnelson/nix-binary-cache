@@ -12,7 +12,7 @@ import Codec.Compression.GZip (compress, decompress)
 
 import Data.KVMap
 import Nix.Cache.Common
-import Nix.Derivation (FileHash(..), fileHashFromText)
+import Nix.FileHash
 
 -- | Type to represent the binary/octet-stream content type, which is
 -- equivalent to application/octet-stream.
