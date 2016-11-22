@@ -19,11 +19,15 @@ let
     "http-client-tls"
     "http-media"
     "http-types"
+    "lifted-async"
+    "lifted-base"
+    "lucid"
     "mtl"
     "parsec"
     "pcre-heavy"
     "process"
     "servant-client"
+    "servant-lucid"
     "servant-server"
     "servant"
     "text"
@@ -33,12 +37,14 @@ let
     "wai"
     "wai-extra"
     "warp"
+    "zlib"
   ];
 
   # Haskell packages the tests depend on (in addition to above).
   testDependencies = [
     "QuickCheck"
     "hspec"
+    "microtimer"
   ];
 
   # Names of extensions that the library uses.
@@ -122,6 +128,9 @@ let
       "import qualified Servant"
       "import qualified Data.Text as T"
       "import qualified Data.Text.Encoding as T"
+      "import ClassyPrelude"
+      "import System.Microtimer"
+      "import Control.Concurrent.Async.Lifted"
       ""
     ]
   ));

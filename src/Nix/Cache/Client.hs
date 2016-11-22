@@ -18,11 +18,14 @@ import qualified Data.HashMap.Strict as H
 import qualified Data.HashSet as HS
 import qualified Data.Vector as V
 import System.Environment (getEnv, lookupEnv)
+import Control.Concurrent.Async.Lifted (wait)
+import GHC.Conc (getNumProcessors)
 
 import Nix.Cache.Common
 import Nix.Cache.API
 import Nix.StorePath
 import Nix.Cache.Types
+import Nix.Nar
 
 -------------------------------------------------------------------------------
 -- * Servant client
@@ -34,12 +37,14 @@ type ClientReq t = Manager -> BaseUrl -> ExceptT ServantError IO t
 -- | Define the client by pattern matching.
 nixCacheInfo :: ClientReq NixCacheInfo
 narInfo :: NarInfoReq -> ClientReq NarInfo
-nar :: NarReq -> ClientReq Nar
+nar :: NarRequest -> ClientReq Nar
 queryPaths :: Vector FilePath -> ClientReq (HashMap FilePath Bool)
+sendNar :: Nar -> ClientReq StorePath
 nixCacheInfo
   :<|> narInfo
   :<|> nar
-  :<|> queryPaths = client (Proxy :: Proxy NixCacheAPI)
+  :<|> queryPaths
+  :<|> sendNar = client (Proxy :: Proxy NixCacheAPI)
 
 -- | Base URL of the nixos cache.
 nixosCacheUrl :: BaseUrl
@@ -60,6 +65,7 @@ authFromEnv = do
   username <- map T.pack <$> lookupEnv "NIX_BINARY_CACHE_USERNAME"
   password <- map T.pack <$> lookupEnv "NIX_BINARY_CACHE_PASSWORD"
   case (username, password) of
+    (Just "", Just _) -> pure Nothing
     (Just user, Just pass) -> pure $ Just $ NixCacheAuth user pass
     _ -> pure Nothing
 
@@ -142,23 +148,33 @@ data NixClientConfig = NixClientConfig {
   -- ^ Location of the nix client path cache.
   nccCacheUrl :: BaseUrl,
   -- ^ Base url of the nix binary cache.
-  nccCacheAuth :: Maybe NixCacheAuth
+  nccCacheAuth :: Maybe NixCacheAuth,
   -- ^ Optional auth for the nix cache, if using HTTPS.
+  nccLogLevel :: LogLevel
+  -- ^ Minimum level of logging messages to show.
   } deriving (Show, Generic)
 
 -- | State for the nix client monad.
 data NixClientState = NixClientState {
   ncsPathTree :: PathTree,
   -- ^ Computed store path dependency tree.
-  ncsSentPaths :: PathSet
-  -- ^ Paths that have already been sent to the nix store.
-  } deriving (Show, Generic)
+  ncsSentPaths :: HashMap StorePath (Async ()),
+  -- ^ Mapping of store paths to asynchronous actions which send those paths.
+  ncsConcurrentSends :: Int
+  -- ^ Number of concurrent sending actions running.
+  } deriving (Generic)
 
 -- | Object read by the nix client reader.
 data NixClientObj = NixClientObj {
   ncoConfig :: NixClientConfig,
+  -- ^ Static configuration of the client.
   ncoState :: MVar NixClientState,
-  ncoManager :: Manager
+  -- ^ Mutable state of the client.
+  ncoManager :: Manager,
+  -- ^ HTTP connection manager client uses to connect.
+  ncoLogMutex :: MVar (),
+  -- ^ Syncronizes logs of the client so they don't overlap.
+  ncoSemaphore :: QSem
   }
 
 -- | Nix client monad.
@@ -171,20 +187,63 @@ runNixClient action = do
   home <- getEnv "HOME"
   cacheUrl <- nixCacheUrlFromEnv
   cacheAuth <- authFromEnv
+  maxWorkers <- (>>= readMay) <$> lookupEnv "MAX_WORKERS" >>= \case
+    Just n | n > 0 -> return n
+    _ -> getNumProcessors
+  minLogLevel <- (>>= readMay) <$> lookupEnv "LOG_LEVEL" >>= \case
+    Just n | n >= 0 -> return n
+    _ -> return _LOG_INFO
+  semaphore <- newQSem maxWorkers
   let cfg = NixClientConfig {
         nccStoreDir = storeDir,
         nccCacheLocation = home </> ".nix-path-cache",
         nccCacheUrl = cacheUrl,
-        nccCacheAuth = cacheAuth
+        nccCacheAuth = cacheAuth,
+        nccLogLevel = minLogLevel
         }
   manager <- mkManager cfg
   pathTree <- readCache $ nccCacheLocation cfg
-  let state = NixClientState { ncsPathTree = pathTree, ncsSentPaths = mempty }
+  let state = NixClientState pathTree mempty 0
   stateMVar <- newMVar state
-  let obj = NixClientObj cfg stateMVar manager
+  logMVar <- newMVar ()
+  -- TODO make this configurable
+  let obj = NixClientObj cfg stateMVar manager logMVar semaphore
   -- Perform the action and then update the cache.
   result <- runReaderT (action <* writeCache) obj
   pure result
+
+-------------------------------------------------------------------------------
+-- * Nix client logging
+-------------------------------------------------------------------------------
+
+type LogLevel = Int
+
+_LOG_DEBUG, _LOG_INFO, _LOG_WARN, _LOG_FATAL :: LogLevel
+(_LOG_DEBUG, _LOG_INFO, _LOG_WARN, _LOG_FATAL) = (15, 30, 45, 60)
+
+-- | Logger. Writes to stdout and ignores level for now. Writes are mutexed.
+ncLog :: LogLevel -> Text -> NixClient ()
+ncLog level message = do
+  minlevel <- nccLogLevel . ncoConfig <$> ask
+  when (level >= minlevel) $ do
+    logmv <- ncoLogMutex <$> ask
+    withMVar logmv $ \_ -> putStrLn message
+
+ncDebug :: Text -> NixClient ()
+ncDebug = ncLog _LOG_DEBUG
+
+ncInfo :: Text -> NixClient ()
+ncInfo = ncLog _LOG_INFO
+
+ncWarn :: Text -> NixClient ()
+ncWarn = ncLog _LOG_WARN
+
+ncFatal :: Text -> NixClient ()
+ncFatal = ncLog _LOG_FATAL
+
+-------------------------------------------------------------------------------
+-- * Nix client HTTP configuration and interaction
+-------------------------------------------------------------------------------
 
 -- | Given some configuration, create the request manager.
 mkManager :: NixClientConfig -> IO Manager
@@ -253,45 +312,62 @@ queryStorePaths :: [StorePath] -- ^ Top-level store paths to send.
                 -> NixClient PathSet -- ^ Store paths that need to be sent.
 queryStorePaths paths = do
   pathsToSend <- newMVar mempty
-  -- A loop which will calculate the full dependency closure.
-  let loop :: [StorePath] -> NixClient ()
-      loop _paths = do
-        flip mapConcurrently _paths $ \path -> do
-          unlessM (elem path <$> readMVar pathsToSend) $ do
-            loop =<< getReferences path
-            modifyMVar_ pathsToSend $ pure . HS.insert path
-        return ()
+  -- Define a recursive function which will concurrently fetch a
+  -- dependency tree of a list of paths.
+  let loop _paths = mapConcurrently getRefs _paths >> return ()
+      getRefs path = unlessM (elem path <$> readMVar pathsToSend) $ do
+        modifyMVar_ pathsToSend $ pure . HS.insert path
+        loop =<< getReferences path
+  -- Call the loop on the input path list.
   loop paths
-  storeDir <- nccStoreDir . ncoConfig <$> ask
   pathList <- HS.toList <$> readMVar pathsToSend
+  storeDir <- nccStoreDir . ncoConfig <$> ask
+  -- Convert the path list to full paths and convert that to a vector.
   let pathsV = V.fromList $ map (spToFull storeDir) pathList
   -- Now that we have the full list built up, send it to the
   -- server to see which paths are already there.
   result <- clientRequest $ queryPaths pathsV
   -- Each of the keys for which the value is False are not on the server.
+  -- In addition, we filter out any paths that we fail to parse.
   let spaths = flip map (H.keys $ H.filter not result) $ \path -> do
         case parseFullStorePath $ pack path of
           Right (_, spath) -> Just spath
           Left _ -> Nothing
+  -- Convert the not-found paths to a set and return it.
   pure $ HS.fromList $ catMaybes spaths
 
 -- | Send a path and its full dependency set to a binary cache.
-sendClosure :: StorePath -> NixClient ()
+sendClosure :: StorePath -> NixClient (Async ())
 sendClosure spath = do
-  mv <- asks ncoState
-  elem spath <$> ncsSentPaths <$> readMVar mv >>= \case
-    True -> do
-      -- Already sent, nothing more to do
-      pure ()
-    False -> do
-      -- Not sent yet.
-      refs <- getReferences spath
-      -- Concurrently send parent paths.
-      mapConcurrently sendClosure refs
-      -- Once parents are sent, send the path itself.
-      sendPath spath
-      modifyMVar_ mv $ \s ->
-        pure s {ncsSentPaths = HS.insert spath $ ncsSentPaths s}
-  where
-    -- | TODO (obvi): actually implement this function
-    sendPath p = putStrLn $ "Sending " <> pack (spToPath p)
+  state <- asks ncoState
+  modifyMVar state $ \s -> do
+    case H.lookup spath $ ncsSentPaths s of
+      Just action -> return (s, action)
+      Nothing -> do
+        action <- async $ do
+          refs <- getReferences spath
+          -- Concurrently send parent paths.
+          refActions <- forM refs $ \ref -> do
+            rAction <- sendClosure ref
+            pure (ref, rAction)
+          forM_ refActions $ \(ref, rAction) -> do
+            ncDebug $ "Waiting for " <> pack (spToPath ref) <> " to finish sending..."
+            wait rAction
+          -- Once parents are sent, send the path itself.
+          sendPath spath
+        let s' = s {ncsSentPaths = H.insert spath action $ ncsSentPaths s}
+        return (s', action)
+
+-- | Send a single path to a nix repo.
+sendPath :: StorePath -> NixClient ()
+sendPath p = do
+  let tp = pack $ spToPath p
+  sem <- ncoSemaphore <$> ask
+  waitQSem sem
+  storeDir <- nccStoreDir . ncoConfig <$> ask
+  ncDebug $ "Getting nar data for " <> tp <> "..."
+  nar <- liftIO $ getNar storeDir p
+  ncInfo $ "Sending " <> tp
+  clientRequest $ sendNar nar
+  ncDebug $ "Finished sending " <> tp
+  signalQSem sem

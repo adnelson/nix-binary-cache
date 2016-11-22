@@ -3,9 +3,12 @@ module Nix.StorePath where
 
 import ClassyPrelude hiding (try)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
 import Text.Regex.PCRE.Heavy (scan, re)
 import System.Process (readCreateProcess, shell)
 import System.Environment (getEnv)
+import Servant (MimeUnrender(..), OctetStream)
+import Servant.HTML.Lucid (HTML)
 
 -- | The nix store directory.
 newtype NixStoreDir = NixStoreDir FilePath
@@ -65,3 +68,20 @@ findSpByPrefix prefix = do
   case parseFullStorePath $ pack result of
     Left err -> error err
     Right (_, sp) -> return sp
+
+-- | Find a nix store path by suffix. If multiple paths satisfy the
+-- suffix, the first one will be taken.
+findSpBySuffix :: Text -> IO StorePath
+findSpBySuffix prefix = do
+  NixStoreDir dir <- getNixStoreDir
+  let cmd = "ls " <> dir <> " | grep '" <> unpack prefix <> "$'"
+  result <- readCreateProcess (shell cmd) ""
+  case parseFullStorePath $ pack result of
+    Left err -> error err
+    Right (_, sp) -> return sp
+
+instance MimeUnrender OctetStream StorePath where
+  mimeUnrender _ = map snd . parseFullStorePath . T.decodeUtf8 . toStrict
+
+instance MimeUnrender HTML StorePath where
+  mimeUnrender _ = map snd . parseFullStorePath . T.decodeUtf8 . toStrict
