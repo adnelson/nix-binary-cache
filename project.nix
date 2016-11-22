@@ -35,6 +35,7 @@ let
     "wai"
     "wai-extra"
     "warp"
+    "zlib"
   ];
 
   # Haskell packages the tests depend on (in addition to above).

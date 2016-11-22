@@ -4,7 +4,6 @@ module Nix.StorePath where
 import ClassyPrelude hiding (try)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
-import qualified Data.ByteString as B
 import Text.Regex.PCRE.Heavy (scan, re)
 import System.Process (readCreateProcess, shell)
 import System.Environment (getEnv)

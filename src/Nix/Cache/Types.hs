@@ -6,8 +6,9 @@ import qualified Data.Text as T
 import Data.Attoparsec.ByteString.Lazy (Result(..), parse)
 import Data.Aeson (ToJSON, FromJSON)
 import Servant (MimeUnrender(..), OctetStream, ToHttpApiData(..), Accept(..),
-                Proxy(..))
+                Proxy(..), MimeRender(..))
 import Network.HTTP.Media ((//))
+import Codec.Compression.GZip (compress, decompress)
 
 import Data.KVMap
 import Nix.Cache.Common
@@ -25,6 +26,21 @@ instance Accept BOctetStream where
 instance MimeUnrender OctetStream t =>
          MimeUnrender BOctetStream t where
   mimeUnrender _ = mimeUnrender (Proxy :: Proxy OctetStream)
+
+
+-- | Represents binary data compressed with gzip.
+data GZipped
+
+-- | Content type for gzipped data.
+instance Accept GZipped where
+  contentType _ = "application" // "x-gzip"
+
+-- | Anything which can be put in an octet stream can be put in gzip.
+instance MimeUnrender OctetStream t => MimeUnrender GZipped t where
+  mimeUnrender _ = mimeUnrender (Proxy :: Proxy OctetStream) . decompress
+
+instance MimeRender OctetStream t => MimeRender GZipped t where
+  mimeRender _ obj = compress $ mimeRender (Proxy :: Proxy OctetStream) obj
 
 -- | Information about a nix binary cache. This information is served
 -- on the /nix-cache-info route.
