@@ -37,7 +37,7 @@ surround start stop p = char start *> p <* char stop
 quotedStorePath :: Parser StorePath
 quotedStorePath = try $ do
   fullPath <- text
-  case parseStorePath fullPath of
+  case snd <$> parseFullStorePath fullPath of
     Left err -> fail err
     Right sp -> return sp
 
