@@ -19,6 +19,7 @@ import qualified Data.HashSet as HS
 import qualified Data.Vector as V
 import System.Environment (getEnv, lookupEnv)
 import Control.Concurrent.Async.Lifted (wait)
+import GHC.Conc (getNumProcessors)
 
 import Nix.Cache.Common
 import Nix.Cache.API
@@ -64,6 +65,7 @@ authFromEnv = do
   username <- map T.pack <$> lookupEnv "NIX_BINARY_CACHE_USERNAME"
   password <- map T.pack <$> lookupEnv "NIX_BINARY_CACHE_PASSWORD"
   case (username, password) of
+    (Just "", Just _) -> pure Nothing
     (Just user, Just pass) -> pure $ Just $ NixCacheAuth user pass
     _ -> pure Nothing
 
@@ -146,8 +148,10 @@ data NixClientConfig = NixClientConfig {
   -- ^ Location of the nix client path cache.
   nccCacheUrl :: BaseUrl,
   -- ^ Base url of the nix binary cache.
-  nccCacheAuth :: Maybe NixCacheAuth
+  nccCacheAuth :: Maybe NixCacheAuth,
   -- ^ Optional auth for the nix cache, if using HTTPS.
+  nccLogLevel :: LogLevel
+  -- ^ Minimum level of logging messages to show.
   } deriving (Show, Generic)
 
 -- | State for the nix client monad.
@@ -185,13 +189,17 @@ runNixClient action = do
   cacheAuth <- authFromEnv
   maxWorkers <- (>>= readMay) <$> lookupEnv "MAX_WORKERS" >>= \case
     Just n | n > 0 -> return n
-    _ -> return (1 :: Int)
+    _ -> getNumProcessors
+  minLogLevel <- (>>= readMay) <$> lookupEnv "LOG_LEVEL" >>= \case
+    Just n | n >= 0 -> return n
+    _ -> return _LOG_INFO
   semaphore <- newQSem maxWorkers
   let cfg = NixClientConfig {
         nccStoreDir = storeDir,
         nccCacheLocation = home </> ".nix-path-cache",
         nccCacheUrl = cacheUrl,
-        nccCacheAuth = cacheAuth
+        nccCacheAuth = cacheAuth,
+        nccLogLevel = minLogLevel
         }
   manager <- mkManager cfg
   pathTree <- readCache $ nccCacheLocation cfg
@@ -210,25 +218,28 @@ runNixClient action = do
 
 type LogLevel = Int
 
+_LOG_DEBUG, _LOG_INFO, _LOG_WARN, _LOG_FATAL :: LogLevel
+(_LOG_DEBUG, _LOG_INFO, _LOG_WARN, _LOG_FATAL) = (15, 30, 45, 60)
+
 -- | Logger. Writes to stdout and ignores level for now. Writes are mutexed.
 ncLog :: LogLevel -> Text -> NixClient ()
-ncLog _ message = do
-  logmv <- ncoLogMutex <$> ask
-  takeMVar logmv
-  putStrLn message
-  putMVar logmv ()
+ncLog level message = do
+  minlevel <- nccLogLevel . ncoConfig <$> ask
+  when (level >= minlevel) $ do
+    logmv <- ncoLogMutex <$> ask
+    withMVar logmv $ \_ -> putStrLn message
 
 ncDebug :: Text -> NixClient ()
-ncDebug = ncLog 15
+ncDebug = ncLog _LOG_DEBUG
 
 ncInfo :: Text -> NixClient ()
-ncInfo = ncLog 30
+ncInfo = ncLog _LOG_INFO
 
 ncWarn :: Text -> NixClient ()
-ncWarn = ncLog 45
+ncWarn = ncLog _LOG_WARN
 
 ncFatal :: Text -> NixClient ()
-ncFatal = ncLog 60
+ncFatal = ncLog _LOG_FATAL
 
 -------------------------------------------------------------------------------
 -- * Nix client HTTP configuration and interaction
@@ -336,7 +347,12 @@ sendClosure spath = do
         action <- async $ do
           refs <- getReferences spath
           -- Concurrently send parent paths.
-          mapM sendClosure refs >>= mapM_ wait
+          refActions <- forM refs $ \ref -> do
+            rAction <- sendClosure ref
+            pure (ref, rAction)
+          forM_ refActions $ \(ref, rAction) -> do
+            ncDebug $ "Waiting for " <> pack (spToPath ref) <> " to finish sending..."
+            wait rAction
           -- Once parents are sent, send the path itself.
           sendPath spath
         let s' = s {ncsSentPaths = H.insert spath action $ ncsSentPaths s}
@@ -345,10 +361,13 @@ sendClosure spath = do
 -- | Send a single path to a nix repo.
 sendPath :: StorePath -> NixClient ()
 sendPath p = do
+  let tp = pack $ spToPath p
   sem <- ncoSemaphore <$> ask
   waitQSem sem
   storeDir <- nccStoreDir . ncoConfig <$> ask
+  ncDebug $ "Getting nar data for " <> tp <> "..."
   nar <- liftIO $ getNar storeDir p
-  ncInfo $ "Sending " <> pack (spToPath p)
+  ncInfo $ "Sending " <> tp
   clientRequest $ sendNar nar
+  ncDebug $ "Finished sending " <> tp
   signalQSem sem

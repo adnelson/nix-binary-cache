@@ -8,6 +8,7 @@ import Text.Regex.PCRE.Heavy (scan, re)
 import System.Process (readCreateProcess, shell)
 import System.Environment (getEnv)
 import Servant (MimeUnrender(..), OctetStream)
+import Servant.HTML.Lucid (HTML)
 
 -- | The nix store directory.
 newtype NixStoreDir = NixStoreDir FilePath
@@ -80,4 +81,7 @@ findSpBySuffix prefix = do
     Right (_, sp) -> return sp
 
 instance MimeUnrender OctetStream StorePath where
+  mimeUnrender _ = map snd . parseFullStorePath . T.decodeUtf8 . toStrict
+
+instance MimeUnrender HTML StorePath where
   mimeUnrender _ = map snd . parseFullStorePath . T.decodeUtf8 . toStrict

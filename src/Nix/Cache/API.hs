@@ -2,6 +2,7 @@ module Nix.Cache.API where
 
 import ClassyPrelude (Vector, FilePath, HashMap, Bool)
 import Servant
+import Servant.HTML.Lucid (HTML)
 
 import Nix.Nar
 import Nix.StorePath
@@ -18,5 +19,5 @@ type NixCacheAPI = "nix-cache-info" :> Get OStream NixCacheInfo
               :<|> "nar" :> Capture "nar" NarRequest :> Get OStream Nar
               :<|> "query-paths" :> ReqBody '[JSON] (Vector FilePath)
                                  :> Get '[JSON] (HashMap FilePath Bool)
-              :<|> "import-path" :> ReqBody '[OctetStream] Nar
-                                 :> Post OStream StorePath
+              :<|> "import-path" :> ReqBody '[GZipped] Nar
+                                 :> Post '[HTML, OctetStream] StorePath
