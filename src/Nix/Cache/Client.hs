@@ -191,8 +191,8 @@ runNixClient action = do
     Just n | n > 0 -> return n
     _ -> getNumProcessors
   minLogLevel <- (>>= readMay) <$> lookupEnv "LOG_LEVEL" >>= \case
-    Just n | n >= 0 -> return n
-    _ -> return _LOG_INFO
+    Just level -> pure level
+    _ -> return LOG_INFO
   binDir <- getNixBinDir
   semaphore <- newQSem maxWorkers
   let cfg = NixClientConfig {
@@ -218,10 +218,9 @@ runNixClient action = do
 -- * Nix client logging
 -------------------------------------------------------------------------------
 
-type LogLevel = Int
-
-_LOG_DEBUG, _LOG_INFO, _LOG_WARN, _LOG_FATAL :: LogLevel
-(_LOG_DEBUG, _LOG_INFO, _LOG_WARN, _LOG_FATAL) = (15, 30, 45, 60)
+data LogLevel
+  = LOG_DEBUG | LOG_INFO | LOG_WARN | LOG_FATAL
+  deriving (Show, Read, Eq, Ord)
 
 -- | Logger. Writes to stdout and ignores level for now. Writes are mutexed.
 ncLog :: LogLevel -> Text -> NixClient ()
@@ -230,20 +229,24 @@ ncLog level message = do
   when (level >= minlevel) $ do
     logmv <- ncoLogMutex <$> ask
     withMVar logmv $ \_ -> do
-      tid <- tshow <$> myThreadId
-      putStrLn $ tid <> ": " <> message
+      case level <= LOG_DEBUG of
+        True -> do
+          tid <- tshow <$> myThreadId
+          putStrLn $ tid <> ": " <> message
+        False -> do
+          putStrLn message
 
 ncDebug :: Text -> NixClient ()
-ncDebug = ncLog _LOG_DEBUG
+ncDebug = ncLog LOG_DEBUG
 
 ncInfo :: Text -> NixClient ()
-ncInfo = ncLog _LOG_INFO
+ncInfo = ncLog LOG_INFO
 
 ncWarn :: Text -> NixClient ()
-ncWarn = ncLog _LOG_WARN
+ncWarn = ncLog LOG_WARN
 
 ncFatal :: Text -> NixClient ()
-ncFatal = ncLog _LOG_FATAL
+ncFatal = ncLog LOG_FATAL
 
 -------------------------------------------------------------------------------
 -- * Nix client HTTP configuration and interaction
@@ -356,10 +359,9 @@ sendClosure spath = do
             rAction <- sendClosure ref
             pure (ref, rAction)
           forM_ refActions $ \(ref, rAction) -> do
-            let tid = asyncThreadId rAction
             ncDebug $ concat [abbrevSP spath, " is waiting for ",
                               abbrevSP ref, " to finish sending (",
-                              tshow tid, ")"]
+                              tshow $ asyncThreadId rAction, ")"]
             wait rAction
             ncDebug $ abbrevSP ref <> " finished"
           -- Once parents are sent, send the path itself.
