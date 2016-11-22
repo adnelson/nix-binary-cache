@@ -5,7 +5,7 @@ import Network.HTTP.Client (Manager, Request(..), ManagerSettings(..),
                             newManager, defaultManagerSettings)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Control.Monad.Trans.Except (ExceptT, runExceptT)
-import Servant
+import Servant (Proxy(..), (:<|>)(..))
 import Servant.Common.BaseUrl (parseBaseUrl)
 import System.Process (readCreateProcess, shell)
 import System.Directory (createDirectoryIfMissing,
