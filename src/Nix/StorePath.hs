@@ -6,13 +6,13 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Text.Regex.PCRE.Heavy (scan, re)
 import System.Process (readCreateProcess, shell)
-import System.Environment (getEnv)
+import System.Environment (getEnv, lookupEnv)
 import Servant (MimeUnrender(..), OctetStream)
 import Servant.HTML.Lucid (HTML)
 
 -- | The nix store directory.
 newtype NixStoreDir = NixStoreDir FilePath
-  deriving (Show, Eq, Generic, Hashable)
+  deriving (Show, Eq, Generic, Hashable, IsString)
 
 -- | The hash and name of an object in the nix store.
 data StorePath = StorePath Text Text
@@ -79,6 +79,11 @@ findSpBySuffix prefix = do
   case parseFullStorePath $ pack result of
     Left err -> error err
     Right (_, sp) -> return sp
+
+-- | Return an abbreviated version of a store path, e.g. for
+-- debugging. Uses only the first 6 characters of the prefix.
+abbrevSP :: StorePath -> Text
+abbrevSP (StorePath hash name) = T.take 6 hash <> "-" <> name
 
 instance MimeUnrender OctetStream StorePath where
   mimeUnrender _ = map snd . parseFullStorePath . T.decodeUtf8 . toStrict

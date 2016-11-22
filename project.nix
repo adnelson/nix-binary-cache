@@ -14,6 +14,7 @@ let
     "base64-bytestring"
     "classy-prelude"
     "directory"
+    "filepath"
     "http-client"
     "http-client-openssl"
     "http-client-tls"
@@ -26,6 +27,7 @@ let
     "parsec"
     "pcre-heavy"
     "process"
+    "process-extras"
     "servant-client"
     "servant-lucid"
     "servant-server"
@@ -130,7 +132,7 @@ let
       "import qualified Data.Text.Encoding as T"
       "import ClassyPrelude"
       "import System.Microtimer"
-      "import Control.Concurrent.Async.Lifted"
+      "import Control.Concurrent.Async.Lifted.Safe"
       ""
     ]
   ));

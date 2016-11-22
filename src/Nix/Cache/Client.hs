@@ -18,7 +18,7 @@ import qualified Data.HashMap.Strict as H
 import qualified Data.HashSet as HS
 import qualified Data.Vector as V
 import System.Environment (getEnv, lookupEnv)
-import Control.Concurrent.Async.Lifted (wait)
+import Control.Concurrent.Async.Lifted.Safe (wait)
 import GHC.Conc (getNumProcessors)
 
 import Nix.Cache.Common
@@ -144,6 +144,8 @@ readCache cacheLocation = doesDirectoryExist cacheLocation >>= \case
 data NixClientConfig = NixClientConfig {
   nccStoreDir :: NixStoreDir,
   -- ^ Location of the nix store.
+  nccBinDir :: FilePath,
+  -- ^ Location of nix binaries.
   nccCacheLocation :: FilePath,
   -- ^ Location of the nix client path cache.
   nccCacheUrl :: BaseUrl,
@@ -191,9 +193,11 @@ runNixClient action = do
   minLogLevel <- (>>= readMay) <$> lookupEnv "LOG_LEVEL" >>= \case
     Just n | n >= 0 -> return n
     _ -> return _LOG_INFO
+  binDir <- getNixBinDir
   semaphore <- newQSem maxWorkers
   let cfg = NixClientConfig {
         nccStoreDir = storeDir,
+        nccBinDir = binDir,
         nccCacheLocation = home </> ".nix-path-cache",
         nccCacheUrl = cacheUrl,
         nccCacheAuth = cacheAuth,
@@ -225,7 +229,9 @@ ncLog level message = do
   minlevel <- nccLogLevel . ncoConfig <$> ask
   when (level >= minlevel) $ do
     logmv <- ncoLogMutex <$> ask
-    withMVar logmv $ \_ -> putStrLn message
+    withMVar logmv $ \_ -> do
+      tid <- tshow <$> myThreadId
+      putStrLn $ tid <> ": " <> message
 
 ncDebug :: Text -> NixClient ()
 ncDebug = ncLog _LOG_DEBUG
@@ -343,14 +349,19 @@ sendClosure spath = do
       Just action -> return (s, action)
       Nothing -> do
         action <- async $ do
+          ncDebug $ "Started process to send " <> abbrevSP spath
           refs <- getReferences spath
           -- Concurrently send parent paths.
           refActions <- forM refs $ \ref -> do
             rAction <- sendClosure ref
             pure (ref, rAction)
           forM_ refActions $ \(ref, rAction) -> do
-            ncDebug $ "Waiting for " <> pack (spToPath ref) <> " to finish sending..."
+            let tid = asyncThreadId rAction
+            ncDebug $ concat [abbrevSP spath, " is waiting for ",
+                              abbrevSP ref, " to finish sending (",
+                              tshow tid, ")"]
             wait rAction
+            ncDebug $ abbrevSP ref <> " finished"
           -- Once parents are sent, send the path itself.
           sendPath spath
         let s' = s {ncsSentPaths = H.insert spath action $ ncsSentPaths s}
@@ -363,11 +374,12 @@ sendPath p = do
   waitQSem =<< asks ncoSemaphore
   ncDebug $ "Getting nar data for " <> tp <> "..."
   storeDir <- nccStoreDir . ncoConfig <$> ask
-  nar <- liftIO $ getNar storeDir p
+  binDir <- nccBinDir . ncoConfig <$> ask
+  nar <- liftIO $ getNar binDir storeDir p
   ncInfo $ "Sending " <> tp
   clientRequest $ sendNar nar
   ncDebug $ "Finished sending " <> tp
   -- Release the resource to the semaphore.
   signalQSem =<< asks ncoSemaphore
   where
-    tp = pack $ spToPath p
+    tp = abbrevSP p

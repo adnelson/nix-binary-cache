@@ -1,17 +1,19 @@
 -- | Nix store archives.
 module Nix.Nar (
   Nar, -- Abstract
-  getNar
+  getNar, getNixBinDir
   ) where
 
 import ClassyPrelude
 import qualified Data.ByteString as B
-import System.Process hiding (readCreateProcess)
 import System.Exit (ExitCode(..))
 import Servant (MimeUnrender(..), OctetStream, ToHttpApiData(..),
                 MimeRender(..))
-                -- Accept(..),
-                -- Proxy(..))
+import System.Process (readCreateProcess, shell)
+import System.Process.ByteString (readProcessWithExitCode)
+import System.FilePath (takeDirectory)
+import System.Directory (doesFileExist)
+import System.Environment (lookupEnv)
 
 import Nix.StorePath (NixStoreDir(..), StorePath(..), spToFull)
 
@@ -27,15 +29,26 @@ instance Show Nar where
 instance MimeUnrender OctetStream Nar where
   mimeUnrender _ = return . Nar . toStrict
 
+-- | Get the nix binary directory path, e.g. where `nix-store` lives.
+getNixBinDir :: IO FilePath
+getNixBinDir = lookupEnv "NIX_BIN_DIR" >>= \case
+  Just dir -> doesFileExist (dir </> "nix-store") >>= \case
+    True -> pure dir
+    False -> findit
+  Nothing -> findit
+  where
+    whichNixStore = shell "which nix-store"
+    findit = takeDirectory <$> readCreateProcess whichNixStore ""
+
 -- | Ask nix for an archive of a store object.
-getNar :: NixStoreDir -> StorePath -> IO Nar
-getNar nsdir spath = do
-  let cmd = "nix-store --export " <> spToFull nsdir spath
-      procSpec = (shell cmd) { std_out = CreatePipe }
-  (_, Just stdout, _, handle) <- createProcess procSpec
-  waitForProcess handle >>= \case
-    ExitFailure code -> error $ cmd <> " failed with " <> show code
-    ExitSuccess -> Nar <$> B.hGetContents stdout
+getNar :: FilePath -> NixStoreDir -> StorePath -> IO Nar
+getNar nixBin nsdir spath = do
+  let nix_store = nixBin </> "nix-store"
+      args = ["--export", spToFull nsdir spath]
+      cmd = nix_store <> intercalate " " args
+  readProcessWithExitCode nix_store args "" >>= \case
+    (ExitSuccess, stdout, _) -> pure $ Nar stdout
+    (ExitFailure code, _, _) -> error $ cmd <> " failed with " <> show code
 
 -- instance ToHttpApiData Nar where
 --   toUrlPiece (
