@@ -6,7 +6,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Text.Regex.PCRE.Heavy (scan, re)
 import System.Process (readCreateProcess, shell)
-import System.Environment (getEnv, lookupEnv)
+import System.Environment (getEnv)
 import Servant (MimeUnrender(..), OctetStream)
 import Servant.HTML.Lucid (HTML)
 
@@ -19,6 +19,13 @@ data StorePath = StorePath Text Text
   deriving (Show, Eq, Generic)
 
 instance Hashable StorePath
+
+-- | A dependency tree, represented as a mapping from a store path to
+-- its set of (immediate, not transitive) dependent paths.
+type PathTree = HashMap StorePath [StorePath]
+
+-- | A set of store paths.
+type PathSet = HashSet StorePath
 
 -- | Path to an object in the nix store.
 type FullStorePath = (NixStoreDir, StorePath)
