@@ -168,8 +168,9 @@ data NixClientObj = NixClientObj {
   -- ^ Mutable state of the client.
   ncoManager :: Manager,
   -- ^ HTTP connection manager client uses to connect.
-  ncoLogMutex :: MVar ()
+  ncoLogMutex :: MVar (),
   -- ^ Syncronizes logs of the client so they don't overlap.
+  ncoSemaphore :: QSem
   }
 
 -- | Nix client monad.
@@ -182,6 +183,10 @@ runNixClient action = do
   home <- getEnv "HOME"
   cacheUrl <- nixCacheUrlFromEnv
   cacheAuth <- authFromEnv
+  maxWorkers <- (>>= readMay) <$> lookupEnv "MAX_WORKERS" >>= \case
+    Just n | n > 0 -> return n
+    _ -> return (1 :: Int)
+  semaphore <- newQSem maxWorkers
   let cfg = NixClientConfig {
         nccStoreDir = storeDir,
         nccCacheLocation = home </> ".nix-path-cache",
@@ -190,12 +195,11 @@ runNixClient action = do
         }
   manager <- mkManager cfg
   pathTree <- readCache $ nccCacheLocation cfg
-  let state = NixClientState { ncsPathTree = pathTree
-                             , ncsSentPaths = mempty
-                             , ncsConcurrentSends = 0}
+  let state = NixClientState pathTree mempty 0
   stateMVar <- newMVar state
   logMVar <- newMVar ()
-  let obj = NixClientObj cfg stateMVar manager logMVar
+  -- TODO make this configurable
+  let obj = NixClientObj cfg stateMVar manager logMVar semaphore
   -- Perform the action and then update the cache.
   result <- runReaderT (action <* writeCache) obj
   pure result
@@ -325,27 +329,26 @@ queryStorePaths paths = do
 sendClosure :: StorePath -> NixClient (Async ())
 sendClosure spath = do
   state <- asks ncoState
-  let modConcurrents f = modifyMVar_ state $ \s ->
-        pure s {ncsConcurrentSends = f (ncsConcurrentSends s)}
-      sendPath p = do
-        c <- ncsConcurrentSends <$> readMVar state
-        storeDir <- nccStoreDir . ncoConfig <$> ask
-        let fullP = spToFull storeDir p
-        ncInfo $ "Sending " <> pack (spToPath p) <> " (" <> tshow c <> ")"
-        -- Mimic "sending" the file by reading it a bunch of times.
-        replicateM_ 20 $ (readFile fullP :: NixClient ByteString) >> pure ()
-      sendAction spath = do
-        modConcurrents (+1)
-        refs <- getReferences spath
-        -- Concurrently send parent paths.
-        mapM sendClosure refs >>= mapM_ wait
-        -- Once parents are sent, send the path itself.
-        sendPath spath
-        modConcurrents (\c -> c - 1)
   modifyMVar state $ \s -> do
     case H.lookup spath $ ncsSentPaths s of
       Just action -> return (s, action)
       Nothing -> do
-        action <- async $ sendAction spath
+        action <- async $ do
+          refs <- getReferences spath
+          -- Concurrently send parent paths.
+          mapM sendClosure refs >>= mapM_ wait
+          -- Once parents are sent, send the path itself.
+          sendPath spath
         let s' = s {ncsSentPaths = H.insert spath action $ ncsSentPaths s}
         return (s', action)
+
+-- | Send a single path to a nix repo.
+sendPath :: StorePath -> NixClient ()
+sendPath p = do
+  sem <- ncoSemaphore <$> ask
+  waitQSem sem
+  storeDir <- nccStoreDir . ncoConfig <$> ask
+  nar <- liftIO $ getNar storeDir p
+  ncInfo $ "Sending " <> pack (spToPath p)
+  clientRequest $ sendNar nar
+  signalQSem sem

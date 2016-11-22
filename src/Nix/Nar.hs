@@ -1,5 +1,8 @@
 -- | Nix store archives.
-module Nix.Nar where
+module Nix.Nar (
+  Nar, -- Abstract
+  getNar
+  ) where
 
 import ClassyPrelude
 import qualified Data.ByteString as B

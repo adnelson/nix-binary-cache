@@ -20,6 +20,7 @@ let
     "http-media"
     "http-types"
     "lifted-async"
+    "lifted-base"
     "mtl"
     "parsec"
     "pcre-heavy"
