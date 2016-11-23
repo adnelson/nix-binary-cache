@@ -15,14 +15,14 @@ parseDerivFromPath sdir spath = parseDerivFile (spToFull sdir spath) >>= \case
   Left err -> fail err
   Right deriv -> pure deriv
 
--- | Given a derivation, retrieve all of the paths it requires to
--- build. Note this is not the full closure, because it does not recur on
--- other derivations.
+-- | Given a derivation, retrieve all of the derivation paths it
+-- requires to build. Note this is not the full closure, because it
+-- does not recur on other derivations. Also note that this does not
+-- include fixturized filesystem paths; it only returns input paths
+-- which are derivations. This is because any filesystem path which
+-- appears in a derivation is known to already exist in the nix store.
 derivInputs :: NixStoreDir -> Derivation -> IO PathSet
-derivInputs storeDir Derivation{..} = do
-  -- Get the paths of all of the input derivations.
-  inputsFromDerivs :: [StorePath] <- concat <$> do
-    forM (H.toList derivInputDerivations) $ \(dpath, outNames) -> do
-      deriv <- parseDerivFromPath storeDir dpath
-      pure $ catMaybes $ lookupOutput deriv <$> outNames
-  pure $ HS.fromList $ derivInputPaths <> inputsFromDerivs
+derivInputs storeDir Derivation{..} = HS.fromList . concat <$> do
+  forM (H.toList derivInputDerivations) $ \(dpath, outNames) -> do
+    deriv <- parseDerivFromPath storeDir dpath
+    pure $ catMaybes $ lookupOutput deriv <$> outNames
