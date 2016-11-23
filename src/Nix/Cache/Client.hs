@@ -5,9 +5,11 @@ import Network.HTTP.Client (Manager, Request(..), ManagerSettings(..),
                             newManager, defaultManagerSettings)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Control.Monad.Trans.Except (ExceptT, runExceptT)
+import qualified Control.Monad.State.Strict as State
 import Servant (Proxy(..), (:<|>)(..))
 import Servant.Common.BaseUrl (parseBaseUrl)
 import System.Process (readCreateProcess, shell)
+import System.Process.Text (readProcessWithExitCode)
 import System.Directory (createDirectoryIfMissing,
                          renameDirectory,
                          doesDirectoryExist)
@@ -20,6 +22,7 @@ import qualified Data.Vector as V
 import System.Environment (getEnv, lookupEnv)
 import Control.Concurrent.Async.Lifted.Safe (wait)
 import GHC.Conc (getNumProcessors)
+import System.Exit (ExitCode(..))
 
 import Nix.Cache.Common
 import Nix.Cache.API
@@ -93,11 +96,11 @@ writeCache = do
   tree <- ncsPathTree <$> readMVar mv
   liftIO $ createDirectoryIfMissing True cacheLocation
   forM_ (H.toList tree) $ \(path, refs) -> do
-    writePathCache path refs
+    writeCacheFor path refs
 
 -- Write the on-disk cache entry for a single path.
-writePathCache :: StorePath -> [StorePath] -> NixClient ()
-writePathCache path refs = do
+writeCacheFor :: StorePath -> [StorePath] -> NixClient ()
+writeCacheFor path refs = do
   cacheLocation <- nccCacheLocation <$> ncoConfig <$> ask
   let pathDir = cacheLocation </> spToPath path
   liftIO (doesDirectoryExist pathDir) >>= \case
@@ -115,9 +118,21 @@ writePathCache path refs = do
       readCreateProcess (shell $ "chmod 0555 " <> pathDir) ""
       pure ()
 
--- | Read a cache from disk into memory.
-readCache :: FilePath -> IO PathTree
-readCache cacheLocation = doesDirectoryExist cacheLocation >>= \case
+-- | Read the references of a single path from the cache, if they exist.
+getReferencesFromCache :: StorePath -> NixClient (Maybe [StorePath])
+getReferencesFromCache spath = do
+  ncDebug $ "Querying cache for references of " <> abbrevSP spath
+  cacheLocation <- nccCacheLocation <$> ncoConfig <$> ask
+  liftIO $ do
+    doesDirectoryExist (cacheLocation </> spToPath spath) >>= \case
+      True -> Just <$> do
+        refStrs <- map pack <$> listDirectory cacheLocation
+        mapM ioParseStorePath refStrs
+      False -> pure Nothing
+
+-- | Load a cache from disk into memory.
+loadCache :: FilePath -> IO PathTree
+loadCache cacheLocation = doesDirectoryExist cacheLocation >>= \case
   False -> pure mempty
   True -> do
     paths <- listDirectory cacheLocation
@@ -197,8 +212,7 @@ runNixClient action = do
         nccLogLevel = minLogLevel
         }
   manager <- mkManager cfg
-  pathTree <- readCache $ nccCacheLocation cfg
-  let state = NixClientState pathTree mempty
+  let state = NixClientState mempty mempty
   stateMVar <- newMVar state
   logMVar <- newMVar ()
   -- TODO make this configurable
@@ -211,11 +225,13 @@ runNixClient action = do
 -- * Nix client logging
 -------------------------------------------------------------------------------
 
+-- | Four levels of logging.
 data LogLevel
   = LOG_DEBUG | LOG_INFO | LOG_WARN | LOG_FATAL
   deriving (Show, Read, Eq, Ord)
 
--- | Logger. Writes to stdout and ignores level for now. Writes are mutexed.
+-- | Logger. Writes to stdout and checks level to see if it should
+-- print. Writes are mutexed so that it's threadsafe.
 ncLog :: LogLevel -> Text -> NixClient ()
 ncLog level message = do
   minlevel <- nccLogLevel . ncoConfig <$> ask
@@ -283,9 +299,9 @@ clientRequest req = do
 
 -- | Get the references of an object by asking the nix-store. This
 -- information is cached by the caller of this function.
-getReferences' :: StorePath -> NixClient [StorePath]
-getReferences' spath = do
-  ncInfo $ "Querying nix-store for references of " <> abbrevSP spath
+getReferencesFromNix :: StorePath -> NixClient [StorePath]
+getReferencesFromNix spath = do
+  ncDebug $ "Querying nix-store for references of " <> abbrevSP spath
   storeDir <- nccStoreDir <$> ncoConfig <$> ask
   let cmd = "nix-store --query --references " <> spToFull storeDir spath
   result <- liftIO $ pack <$> readCreateProcess (shell $ unpack cmd) ""
@@ -298,44 +314,64 @@ getReferences :: StorePath -> NixClient [StorePath]
 getReferences spath = do
   mv <- asks ncoState
   modifyMVar mv $ \s -> do
-    let t = ncsPathTree s
-    case lookup spath t of
+    -- Adds some new references to the path tree.
+    let addRefs refs = s {ncsPathTree = H.insert spath refs $ ncsPathTree s}
+    case lookup spath $ ncsPathTree s of
       Just refs -> pure (s, refs)
-      Nothing -> do
-        refs' <- getReferences' spath
-        -- Filter out self-referential paths.
-        let refs = filter (/= spath) refs'
-        pure (s {ncsPathTree = H.insert spath refs t}, refs)
+      -- Next check the on-disk cache.
+      Nothing -> getReferencesFromCache spath >>= \case
+        Just refs -> pure (addRefs refs, refs)
+        -- If it's still not there, then ask nix-store for the references.
+        Nothing -> do
+          refs' <- getReferencesFromNix spath
+          -- Filter out self-referential paths.
+          let refs = filter (/= spath) refs'
+          pure (addRefs refs, refs)
+
+-- | Get the full runtime path dependency closure of a store path.
+getClosure :: StorePath -> NixClient [StorePath]
+getClosure path = do
+  NixBinDir nixBin <- nccBinDir . ncoConfig <$> ask
+  storeDir <- nccStoreDir . ncoConfig <$> ask
+  let nix_store = nixBin </> "nix-store"
+      args = ["-qR", spToFull storeDir path]
+  liftIO $ readProcessWithExitCode nix_store args "" >>= \case
+    (ExitSuccess, stdout, _) -> do
+      map snd <$> mapM ioParseFullStorePath (splitWS stdout)
+    (ExitFailure code, _, stderr) -> do
+      error msg
+      where cmd = nix_store <> " " <> intercalate " " args
+            msg' = cmd <> " failed with " <> show code
+            msg = msg' <> unpack (if T.strip stderr == "" then ""
+                                  else "\nSTDERR:\n" <> stderr)
 
 -- | Given some store paths to send, find their closure and see which
--- of those paths need to be sent to the server.
-queryStorePaths :: [StorePath] -- ^ Top-level store paths to send.
-                -> NixClient PathSet -- ^ Store paths that need to be sent.
+-- of those paths do not already exist on the server.
+queryStorePaths :: [StorePath]
+                -- ^ Top-level store paths to send.
+                -> NixClient (PathSet, PathSet)
+                -- ^ Set of paths on the server, and not on the server.
 queryStorePaths paths = do
-  pathsToSend <- newMVar mempty
-  -- Define a recursive function which will concurrently fetch a
-  -- dependency tree of a list of paths.
-  let loop _paths = mapConcurrently getRefs _paths >> return ()
-      getRefs path = unlessM (elem path <$> readMVar pathsToSend) $ do
-        modifyMVar_ pathsToSend $ pure . HS.insert path
-        loop =<< getReferences path
-  -- Call the loop on the input path list.
-  loop paths
-  pathList <- HS.toList <$> readMVar pathsToSend
+  let count paths = len <> " path" <> if len == "1" then "" else "s"
+        where len = tshow $ length paths
+  ncDebug $ "Computing full closure of " <> count paths <> "."
+  pathsToSend <- HS.fromList . concat <$> mapM getClosure paths
+  ncDebug $ "Full closure contains " <> count pathsToSend <> "."
   storeDir <- nccStoreDir . ncoConfig <$> ask
   -- Convert the path list to full paths and convert that to a vector.
-  let pathsV = V.fromList $ map (spToFull storeDir) pathList
+  let pathsV = V.fromList $ map (spToFull storeDir) $ HS.toList pathsToSend
   -- Now that we have the full list built up, send it to the
   -- server to see which paths are already there.
-  result <- clientRequest $ queryPaths pathsV
-  -- Each of the keys for which the value is False are not on the server.
-  -- In addition, we filter out any paths that we fail to parse.
-  let spaths = flip map (H.keys $ H.filter not result) $ \path -> do
-        case parseFullStorePath $ pack path of
-          Right (_, spath) -> Just spath
-          Left _ -> Nothing
-  -- Convert the not-found paths to a set and return it.
-  pure $ HS.fromList $ catMaybes spaths
+  response <- clientRequest $ queryPaths pathsV
+  -- Split the dictionary into two lists.
+  result <- flip State.execStateT (mempty, mempty) $ do
+    forM_ (H.toList response) $ \(pathStr, isInRepo) -> do
+      spath <- snd <$> ioParseFullStorePath (pack pathStr)
+      State.modify $ \(inrepo, notinrepo) -> case isInRepo of
+        True -> (HS.insert spath inrepo, notinrepo)
+        False -> (inrepo, HS.insert spath notinrepo)
+  ncDebug $ count (fst result) " paths are already on the repo, and "
+         <> count (snd result) " paths are not."
 
 -- | Send a path and its full dependency set to a binary cache.
 sendClosure :: StorePath -> NixClient (Async ())
@@ -368,14 +404,12 @@ sendPath :: StorePath -> NixClient ()
 sendPath p = do
   -- Acquire a resource from our semaphore.
   waitQSem =<< asks ncoSemaphore
-  ncDebug $ "Getting nar data for " <> tp <> "..."
+  ncDebug $ "Getting nar data for " <> abbrevSP p <> "..."
   storeDir <- nccStoreDir . ncoConfig <$> ask
   binDir <- nccBinDir . ncoConfig <$> ask
   nar <- liftIO $ getNar binDir storeDir p
-  ncInfo $ "Sending " <> tp
+  ncInfo $ "Sending " <> abbrevSP p
   clientRequest $ sendNar nar
-  ncDebug $ "Finished sending " <> tp
+  ncDebug $ "Finished sending " <> abbrevSP p
   -- Release the resource to the semaphore.
   signalQSem =<< asks ncoSemaphore
-  where
-    tp = abbrevSP p

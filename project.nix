@@ -2,6 +2,7 @@
 
 let
   pname = "nix-binary-cache";
+
   version = "0.0.1";
   # Haskell packages the library depends on (in addition to above). We
   # use names here because for some reason some of these are null in
@@ -82,6 +83,7 @@ let
     which
   ];
 
+  # Given a list of strings, look all of them up in the haskell package set.
   toHaskellPkgs = map (pname: haskellPackages."${pname}");
 
   inherit (builtins) compareVersions;
@@ -130,6 +132,7 @@ let
       "import qualified Servant"
       "import qualified Data.Text as T"
       "import qualified Data.Text.Encoding as T"
+      "import qualified Data.HashMap.Strict as H"
       "import ClassyPrelude"
       "import System.Microtimer"
       "import Control.Concurrent.Async.Lifted.Safe"

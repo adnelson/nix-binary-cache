@@ -68,10 +68,16 @@ parseFullStorePath txt = case unsnoc $ T.split (=='/') txt of
     return (NixStoreDir storeDir, basepath)
 
 -- | Parse a StorePath in the IO monad.
-ioParseStorePath :: Text -> IO StorePath
-ioParseStorePath txt = case parseStorePath txt of
+ioParseStorePath :: MonadIO io => Text -> io StorePath
+ioParseStorePath txt = liftIO $ case parseStorePath txt of
   Left err -> error err
   Right sp -> return sp
+
+-- | Parse a full store path in the IO monad.
+ioParseFullStorePath :: MonadIO io => Text -> io (NixStoreDir, StorePath)
+ioParseFullStorePath txt = liftIO $ case parseFullStorePath txt of
+  Left err -> error err
+  Right result -> return result
 
 -- | Given a nix store dir and a store path, produce a full file path.
 spToFull :: NixStoreDir -> StorePath -> FilePath
