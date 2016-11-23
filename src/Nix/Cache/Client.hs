@@ -370,8 +370,27 @@ queryStorePaths paths = do
       State.modify $ \(inrepo, notinrepo) -> case isInRepo of
         True -> (HS.insert spath inrepo, notinrepo)
         False -> (inrepo, HS.insert spath notinrepo)
-  ncDebug $ count (fst result) " paths are already on the repo, and "
-         <> count (snd result) " paths are not."
+  ncDebug $ count (fst result) <> " paths are already on the repo, and "
+         <> count (snd result) <> " paths are not."
+  pure result
+
+-- | Send paths and their dependencies, after first checking for ones
+-- already sent.
+sendClosures :: [StorePath] -> NixClient ()
+sendClosures spaths = do
+  state <- ncoState <$> ask
+  modifyMVar state $ \s -> do
+    (inRepo, _) <- queryStorePaths spaths
+    actions <- map H.fromList $ forM (HS.toList inRepo) $ \path -> do
+      action <- async $ do
+        -- Instead of a send action, just print a debug message that
+        -- it was already sent.
+        ncDebug $ abbrevSP path <> " was already in the repo."
+      pure (path, action)
+    -- Update the state, inserting no-op actions for any paths which
+    -- have already been sent.
+    pure (s {ncsSentPaths = ncsSentPaths s <> actions}, ())
+  mapM sendClosure spaths >>= mapM_ wait
 
 -- | Send a path and its full dependency set to a binary cache.
 sendClosure :: StorePath -> NixClient (Async ())
