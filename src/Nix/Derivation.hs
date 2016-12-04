@@ -15,6 +15,14 @@ parseDerivFromPath sdir spath = parseDerivFile (spToFull sdir spath) >>= \case
   Left err -> fail err
   Right deriv -> pure deriv
 
+-- | Parse a derivation file from a storepath, using the NIX_STORE variable.
+parseDerivFromPath' :: StorePath -> IO Derivation
+parseDerivFromPath' p = getNixStoreDir >>= flip parseDerivFromPath p
+
+-- | Parse a derivation file given its store prefix.
+parseDerivFromPrefix :: Text -> IO Derivation
+parseDerivFromPrefix prefix = parseDerivFromPath' =<< findSpByPrefix prefix
+
 -- | Given a derivation, retrieve all of the derivation paths it
 -- requires to build. Note this is not the full closure, because it
 -- does not recur on other derivations. Also note that this does not
