@@ -1,6 +1,6 @@
 module Nix.Cache.API where
 
-import ClassyPrelude (Vector, FilePath, HashMap, Bool)
+import ClassyPrelude (Vector, FilePath, HashMap, Bool, Text)
 import Servant
 import Servant.HTML.Lucid (HTML)
 

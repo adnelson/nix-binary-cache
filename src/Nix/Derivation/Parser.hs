@@ -37,7 +37,7 @@ surround start stop p = char start *> p <* char stop
 quotedStorePath :: Parser StorePath
 quotedStorePath = try $ do
   fullPath <- text
-  case parseStorePath fullPath of
+  case snd <$> parseFullStorePath fullPath of
     Left err -> fail err
     Right sp -> return sp
 
@@ -59,7 +59,7 @@ derivationParser = do
     -- [("out","/nix/store/xyz-foo","sha256","abc123")]
     outs <- brackets $ sepCommas1 $ do
       parens $ do
-        outName <- text
+        outName <- OutputName <$> text
         char ','
         outPath <- quotedStorePath
         char ','
@@ -87,12 +87,12 @@ derivationParser = do
       parens $ do
         inDName <- quotedStorePath
         char ','
-        inDOutputs <- textList
+        inDOutputs <- map OutputName <$> textList
         return (inDName, inDOutputs)
     -- Grab the input file list (not derivations). Just a list of
     -- strings.
     char ','
-    inFiles <- brackets $ map unpack text `sepBy` char ','
+    inFiles <- brackets $ sepCommas quotedStorePath
     -- Grab the system info string.
     system <- char ',' >> text
     -- Grab the builder executable path.

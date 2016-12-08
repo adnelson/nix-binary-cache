@@ -6,9 +6,11 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Text.Regex.PCRE.Heavy (scan, re)
 import System.Process (readCreateProcess, shell)
-import System.Environment (getEnv)
+import System.Environment (getEnv, lookupEnv)
 import Servant (MimeUnrender(..), OctetStream)
 import Servant.HTML.Lucid (HTML)
+import System.FilePath (takeDirectory)
+import System.Directory (doesFileExist)
 
 -- | The nix store directory.
 newtype NixStoreDir = NixStoreDir FilePath
@@ -34,6 +36,20 @@ type FullStorePath = (NixStoreDir, StorePath)
 getNixStoreDir :: IO NixStoreDir
 getNixStoreDir = NixStoreDir <$> getEnv "NIX_STORE"
 
+-- | Path to the directory containing nix binaries.
+newtype NixBinDir = NixBinDir FilePath deriving (Show, Eq, IsString)
+
+-- | Get the nix binary directory path, e.g. where `nix-store` lives.
+getNixBinDir :: IO NixBinDir
+getNixBinDir = lookupEnv "NIX_BIN_DIR" >>= \case
+  Just dir -> doesFileExist (dir </> "nix-store") >>= \case
+    True -> pure $ NixBinDir dir
+    False -> findit
+  Nothing -> findit
+  where
+    cmd = shell "which nix-store"
+    findit = NixBinDir . takeDirectory <$> readCreateProcess cmd ""
+
 -- | Parse a nix store path from text. The input text should be a
 -- basepath, not a full path (i.e., it should not be
 -- '/nix/store/xyz-foo', but instead should be 'xyz-foo').
@@ -52,10 +68,16 @@ parseFullStorePath txt = case unsnoc $ T.split (=='/') txt of
     return (NixStoreDir storeDir, basepath)
 
 -- | Parse a StorePath in the IO monad.
-ioParseStorePath :: Text -> IO StorePath
-ioParseStorePath txt = case parseStorePath txt of
+ioParseStorePath :: MonadIO io => Text -> io StorePath
+ioParseStorePath txt = liftIO $ case parseStorePath txt of
   Left err -> error err
   Right sp -> return sp
+
+-- | Parse a full store path in the IO monad.
+ioParseFullStorePath :: MonadIO io => Text -> io (NixStoreDir, StorePath)
+ioParseFullStorePath txt = liftIO $ case parseFullStorePath txt of
+  Left err -> error err
+  Right result -> return result
 
 -- | Given a nix store dir and a store path, produce a full file path.
 spToFull :: NixStoreDir -> StorePath -> FilePath
