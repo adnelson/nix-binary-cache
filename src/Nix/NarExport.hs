@@ -2,15 +2,15 @@
 module Nix.NarExport where
 
 import ClassyPrelude
-import qualified Control.Monad.State.Strict as State
 import qualified Data.ByteString.Char8 as B8
+import qualified Data.ByteString.Lazy.Char8 as LB8
 import qualified Data.Text as T
 
 import Nix.Nar (Nar, narToBytestring, getNar)
 import Nix.StorePath (StorePath, NixBinDir(..), NixStoreDir, spToFull,
                       ioParseFullStorePath, nixStoreText, nixStoreBS,
                       getNixBinDir, getNixStoreDir)
-import Data.ByteString.Builder (toLazyByteString, word64LE)
+import Data.ByteString.Builder (toLazyByteString, word64LE, byteString)
 
 data NarExport = NarExport {
   neStoreDir :: NixStoreDir,
@@ -43,6 +43,7 @@ getExport nixBin storeDir spath = do
   pure NarExport {neStoreDir = storeDir, neStorePath = spath,
                   neNar = nar, neReferences = refs, neDeriver = deriver}
 
+-- | Get an export using the default nix store and bin paths.
 getExport' :: StorePath -> IO NarExport
 getExport' spath = do
   nixBin <- getNixBinDir
@@ -61,7 +62,7 @@ getExportRaw' spath = do
   getExportRaw nixBin storeDir spath
 
 
--- | Magic 8-byte number nix expects at the beginning of an export.
+-- | Magic number nix expects at the beginning of an export.
 _EXPORT_MAGIC_1 :: ByteString
 _EXPORT_MAGIC_1 = "\x01\x00\x00\x00\x00\x00\x00\x00"
 
@@ -100,29 +101,35 @@ _EXPORT_MAGIC_2 = "NIXE\x00\x00\x00\x00"
 --
 -- Note that there are three zeros following the "hello" text, in
 -- order to pad it to eight bytes.
-narExportToBytestring :: NarExport -> ByteString
-narExportToBytestring NarExport{..} = flip State.execState mempty $ do
-  let add s = State.modify (<> s)
-      -- Implementing the string-encoding logic described above.
-      addString str = do
-        let len = length str
-        -- Add the length of a string, represented in 8 bytes.
-        add $ toStrict $ toLazyByteString $ word64LE (fromIntegral len)
-        -- Add the string.
-        add str
-        -- Add padding if necessary.
-        add $ replicate (8 - (len `mod` 8)) 0
-      addStorePath sp = addString $ B8.pack $ spToFull neStoreDir sp
-
+narExportToBytestring :: NarExport -> LB8.ByteString
+narExportToBytestring NarExport{..} = toLazyByteString $ concat $ [
   -- Magic 8-byte number nix expects at the beginning of an export.
-  add _EXPORT_MAGIC_1
-  add $ narToBytestring neNar
+  byteString _EXPORT_MAGIC_1,
+  -- Bytes of the nar itself.
+  byteString $ narToBytestring neNar,
   -- Another magic 8-byte number that comes after the NAR.
-  add _EXPORT_MAGIC_2
-  -- Add the store path of the object itself, followed by its references.
-  mapM addStorePath (neStorePath : neReferences)
-  -- Add the deriver path, if it's present. Otherwise an empty string.
-  maybe (addString "") addStorePath neDeriver
+  byteString _EXPORT_MAGIC_2,
+  -- Store path of the object being archived.
+  addStorePath neStorePath,
+  -- Add the number of references.
+  addInt $ length neReferences
+  -- Add the paths of references, sorted lexicographically.
+  ] <> map addStorePath (sort neReferences) <> [
+  -- Add the deriver if it's known, otherwise an empty string.
+  maybe (addString "") addStorePath neDeriver,
   -- Add 16 zeros: 8 to indicate no signature, and then another 8 to
   -- indicate the end of the export.
-  add $ replicate 16 0
+  byteString $ replicate 16 0
+  ] where
+    addInt i = word64LE (fromIntegral i)
+    -- Implementing the string-encoding logic described above.
+    addString str = concat [
+        -- Add the length of a string, represented in 8 bytes.
+        addInt (length str)
+        -- Add the string.
+      , byteString str
+        -- Add padding if necessary, to make the total length a multiple of 8.
+      , byteString $ let padding = 8 - (length str `mod` 8) in
+        if (padding < 8) then replicate padding 0 else ""
+      ]
+    addStorePath sp = addString $! B8.pack $! spToFull neStoreDir sp

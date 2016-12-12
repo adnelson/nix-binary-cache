@@ -1,7 +1,7 @@
 -- | Nix store archives.
 module Nix.Nar (
   Nar, -- Abstract
-  getNar, narToBytestring, narFromBytestring
+  getNar, getNar', narToBytestring, narFromBytestring
   ) where
 
 import ClassyPrelude
@@ -26,8 +26,9 @@ instance MimeUnrender OctetStream Nar where
 -- | Ask nix for an archive of a store object.
 getNar :: NixBinDir -> NixStoreDir -> StorePath -> IO Nar
 getNar nixBin nsdir spath = Nar <$> nixStoreBS nixBin args where
-  args = ["--export", spToFull nsdir spath]
+  args = ["--dump", spToFull nsdir spath]
 
+-- | Get an export using the default nix store and bin paths.
 getNar' :: StorePath -> IO Nar
 getNar' spath = do
   binDir <- getNixBinDir
