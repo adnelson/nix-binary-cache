@@ -1,7 +1,7 @@
 -- | Nix store archives.
 module Nix.Nar (
   Nar, -- Abstract
-  getNar
+  getNar, narToBytestring, narFromBytestring
   ) where
 
 import ClassyPrelude
@@ -33,6 +33,14 @@ getNar (NixBinDir nixBin) nsdir spath = do
     (ExitSuccess, stdout, _) -> pure $ Nar stdout
     (ExitFailure code, _, _) -> error $ cmd <> " failed with " <> show code
       where cmd = nix_store <> intercalate " " args
+
+-- | Convert a NAR to a bytestring.
+narToBytestring :: Nar -> ByteString
+narToBytestring (Nar bytes) = bytes
+
+-- | Convert a bytestring to a NAR.
+narFromBytestring :: ByteString -> Maybe Nar
+narFromBytestring = Just . Nar
 
 -- instance ToHttpApiData Nar where
 --   toUrlPiece (

@@ -29,6 +29,7 @@ import Nix.Cache.API
 import Nix.StorePath
 import Nix.Cache.Types
 import Nix.Nar
+import Nix.NarInfo
 
 -------------------------------------------------------------------------------
 -- * Servant client

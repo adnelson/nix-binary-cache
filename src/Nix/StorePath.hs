@@ -18,7 +18,7 @@ newtype NixStoreDir = NixStoreDir FilePath
 
 -- | The hash and name of an object in the nix store.
 data StorePath = StorePath Text Text
-  deriving (Show, Eq, Generic)
+  deriving (Show, Eq, Ord, Generic)
 
 instance Hashable StorePath
 
@@ -60,7 +60,7 @@ parseStorePath txt =
     _ -> Left $ show txt <> " does not appear to be a store basepath"
 
 -- | Parse a store path from text. Probably not super efficient but oh well.
-parseFullStorePath :: Text -> Either String (NixStoreDir, StorePath)
+parseFullStorePath :: Text -> Either String FullStorePath
 parseFullStorePath txt = case unsnoc $ T.split (=='/') txt of
   Nothing -> Left $ show txt <> " does not appear to be a store path"
   Just (intercalate "/" -> unpack -> storeDir, pathInStore) -> do
@@ -82,6 +82,10 @@ ioParseFullStorePath txt = liftIO $ case parseFullStorePath txt of
 -- | Given a nix store dir and a store path, produce a full file path.
 spToFull :: NixStoreDir -> StorePath -> FilePath
 spToFull (NixStoreDir storeDir) p = storeDir </> spToPath p
+
+-- | Same as above, but uses a FullStorePath, when that's more concise.
+spToFull' :: FullStorePath -> FilePath
+spToFull' = uncurry spToFull
 
 -- | Convert a StorePath to a FilePath.
 spToPath :: StorePath -> FilePath
