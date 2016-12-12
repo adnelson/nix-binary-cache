@@ -6,14 +6,9 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Text.Regex.PCRE.Heavy (scan, re)
 import System.Process (readCreateProcess, shell)
-import System.Environment (getEnv, lookupEnv)
+import System.Environment (getEnv)
 import Servant (MimeUnrender(..), OctetStream)
 import Servant.HTML.Lucid (HTML)
-import System.Directory (doesFileExist)
-import System.Exit (ExitCode(..))
-import qualified System.Process.ByteString as PB
-import qualified System.Process.Text as PT
-import qualified Data.ByteString.Char8 as B8
 
 -- | The nix store directory.
 newtype NixStoreDir = NixStoreDir FilePath

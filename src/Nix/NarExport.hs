@@ -4,7 +4,6 @@ module Nix.NarExport where
 import ClassyPrelude
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy.Char8 as LB8
-import qualified Data.Text as T
 
 import Nix.Nar (Nar, narToBytestring, getNar)
 import Nix.Bin (NixBinDir, getNixBinDir, nixCmd)

@@ -12,15 +12,16 @@ import Nix.Bin
 
 -- | Create a minimal derivation in the nix store. Does not do
 -- resource cleanup! These files should be tiny though.
-createDeriv :: Text -> Text -> Text -> IO Derivation
+createDeriv :: Text -> Text -> Text -> IO (NixStoreDir, StorePath, Derivation)
 createDeriv name builder system= do
   let expr = concat ["derivation {name = ", show name, ";",
                      "builder = ", show builder, ";",
                      "system = ", show system, ";}"]
   (storeDir, path) <- nixCmd' "instantiate" ["-E", expr]
-  parseDerivFromPath storeDir path
+  deriv <- parseDerivFromPath storeDir path
+  return (storeDir, path, deriv)
 
-createRandomDeriv :: IO Derivation
+createRandomDeriv :: IO (NixStoreDir, StorePath, Derivation)
 createRandomDeriv = do
   name <- T.pack <$> randomWord randomASCII 10
   builder <- T.pack <$> randomWord randomASCII 10
@@ -33,7 +34,7 @@ derivSpec = describe "derivations" $ do
     name <- T.pack <$> randomWord randomASCII 10
     builder <- T.pack <$> randomWord randomASCII 10
     system <- T.pack <$> randomWord randomASCII 10
-    deriv <- createDeriv name builder system
+    (_, _, deriv) <- createDeriv name builder system
     H.size (derivEnv deriv) `shouldBe` 4
     derivGetEnv "name" deriv `shouldBe` Just name
     derivGetEnv "builder" deriv `shouldBe` Just builder

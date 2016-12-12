@@ -15,6 +15,7 @@ import Nix.Derivation
 import Nix.Derivation.Tests
 import Nix.Nar
 import Nix.NarExport
+import Nix.NarExport.Tests
 import Nix.Bin
 
 -- Define some things purely to suppress redundancy warnings
@@ -58,3 +59,4 @@ main = hspec $ do
   KVMapTests.kvMapSpec
   TypesTests.fileHashSpec
   derivSpec
+  narExportSpec
