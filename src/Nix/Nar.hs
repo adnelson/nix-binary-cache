@@ -6,11 +6,10 @@ module Nix.Nar (
 
 import ClassyPrelude
 import qualified Data.ByteString as B
-import System.Exit (ExitCode(..))
 import Servant (MimeUnrender(..), OctetStream, MimeRender(..))
-import System.Process.ByteString (readProcessWithExitCode)
 
-import Nix.StorePath (NixStoreDir(..), NixBinDir(..), StorePath(..), spToFull)
+import Nix.StorePath (NixStoreDir(..), NixBinDir(..), StorePath(..), spToFull,
+                      nixStoreBS)
 
 -- | An archived nix store object.
 newtype Nar = Nar ByteString
@@ -26,13 +25,8 @@ instance MimeUnrender OctetStream Nar where
 
 -- | Ask nix for an archive of a store object.
 getNar :: NixBinDir -> NixStoreDir -> StorePath -> IO Nar
-getNar (NixBinDir nixBin) nsdir spath = do
-  let nix_store = nixBin </> "nix-store"
-      args = ["--export", spToFull nsdir spath]
-  readProcessWithExitCode nix_store args "" >>= \case
-    (ExitSuccess, stdout, _) -> pure $ Nar stdout
-    (ExitFailure code, _, _) -> error $ cmd <> " failed with " <> show code
-      where cmd = nix_store <> intercalate " " args
+getNar nixBin nsdir spath = Nar <$> nixStoreBS nixBin args where
+  args = ["--export", spToFull nsdir spath]
 
 -- | Convert a NAR to a bytestring.
 narToBytestring :: Nar -> ByteString

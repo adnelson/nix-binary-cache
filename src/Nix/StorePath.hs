@@ -11,6 +11,9 @@ import Servant (MimeUnrender(..), OctetStream)
 import Servant.HTML.Lucid (HTML)
 import System.FilePath (takeDirectory)
 import System.Directory (doesFileExist)
+import System.Exit (ExitCode(..))
+import qualified System.Process.ByteString as PB
+import qualified System.Process.Text as PT
 
 -- | The nix store directory.
 newtype NixStoreDir = NixStoreDir FilePath
@@ -50,6 +53,23 @@ getNixBinDir = lookupEnv "NIX_BIN_DIR" >>= \case
     cmd = shell "which nix-store"
     findit = NixBinDir . takeDirectory <$> readCreateProcess cmd ""
 
+-- | Call `nix-store` with the given arguments, return a ByteString.
+nixStoreBS :: NixBinDir -> [String] -> IO ByteString
+nixStoreBS (NixBinDir nixBin) args = do
+  PB.readProcessWithExitCode (nixBin </> "nix-store") args "" >>= \case
+    (ExitSuccess, stdout, _) -> pure stdout
+    (ExitFailure code, _, _) -> error $ cmd <> " failed with " <> show code
+      where cmd = "nix-store " <> intercalate " " args
+
+-- | Call `nix-store` with the given arguments, return Text.
+nixStoreText :: NixBinDir -> [String] -> IO Text
+nixStoreText (NixBinDir nixBin) args = do
+  PT.readProcessWithExitCode (nixBin </> "nix-store") args "" >>= \case
+    (ExitSuccess, stdout, _) -> pure stdout
+    (ExitFailure code, _, _) -> error $ cmd <> " failed with " <> show code
+      where cmd = "nix-store " <> intercalate " " args
+
+
 -- | Parse a nix store path from text. The input text should be a
 -- basepath, not a full path (i.e., it should not be
 -- '/nix/store/xyz-foo', but instead should be 'xyz-foo').
@@ -74,7 +94,7 @@ ioParseStorePath txt = liftIO $ case parseStorePath txt of
   Right sp -> return sp
 
 -- | Parse a full store path in the IO monad.
-ioParseFullStorePath :: MonadIO io => Text -> io (NixStoreDir, StorePath)
+ioParseFullStorePath :: MonadIO io => Text -> io FullStorePath
 ioParseFullStorePath txt = liftIO $ case parseFullStorePath txt of
   Left err -> error err
   Right result -> return result

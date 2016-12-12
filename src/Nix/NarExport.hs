@@ -4,23 +4,43 @@ module Nix.NarExport where
 import ClassyPrelude
 import qualified Control.Monad.State.Strict as State
 import qualified Data.ByteString.Char8 as B8
+import qualified Data.Text as T
 
-import Nix.Nar (Nar, narToBytestring)
-import Nix.StorePath (StorePath, NixStoreDir, spToFull)
+import Nix.Nar (Nar, narToBytestring, getNar)
+import Nix.StorePath (StorePath, NixBinDir(..), NixStoreDir, spToFull,
+                      ioParseFullStorePath, nixStoreText)
 import Data.ByteString.Builder (toLazyByteString, word64LE)
 
 data NarExport = NarExport {
-  neNar :: Nar,
-  -- ^ Archived store object.
   neStoreDir :: NixStoreDir,
   -- ^ Path to the nix store.
   neStorePath :: StorePath,
   -- ^ Path of the contained store object.
+  neNar :: Nar,
+  -- ^ Archived store object.
   neReferences :: [StorePath],
   -- ^ References of the object.
   neDeriver :: Maybe StorePath
   -- ^ Path to the derivation that produced the store object.
   } deriving (Show, Eq, Generic)
+
+-- | Load a nar export from disk. Note that we could do this by just
+-- calling `nix-store --export`; however, since we know how to construct
+-- an export one with more type safety, we can do this here.
+getExport :: NixBinDir -> NixStoreDir -> StorePath -> IO NarExport
+getExport nixBin storeDir spath = do
+  let full = spToFull storeDir spath
+  nar <- getNar nixBin storeDir spath
+  -- Get references and deriver info from nix-store.
+  refs <- do
+    paths <- T.lines <$> nixStoreText nixBin ["--query", "--references", full]
+    forM paths $ \rawSpath -> do
+      snd <$> ioParseFullStorePath rawSpath
+  deriver <- nixStoreText nixBin ["--deriver", full] >>= \case
+    "unknown-deriver" -> pure Nothing
+    path -> Just . snd <$> ioParseFullStorePath path
+  pure NarExport {neStoreDir = storeDir, neStorePath = spath,
+                  neNar = nar, neReferences = refs, neDeriver = deriver}
 
 -- | Convert to a ByteString.
 --
