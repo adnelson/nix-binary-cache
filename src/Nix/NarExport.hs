@@ -64,11 +64,17 @@ narExportToBytestring NarExport{..} = flip State.execState mempty $ do
         add str
         -- Add padding if necessary.
         add $ replicate (8 - (len `mod` 8)) 0
+      addStorePath sp = addString $ B8.pack $ spToFull neStoreDir sp
+
   -- Magic 8-byte number nix expects at the beginning of an export.
   add "\x01\x00\x00\x00\x00\x00\x00\x00"
   add $ narToBytestring neNar
   -- Another magic 8-byte number that comes after the NAR.
   add "NIXE\x00\x00\x00\x00"
   -- Add the store path of the object itself, followed by its references.
-  forM (neStorePath : neReferences) $ \spath -> do
-    addString $ B8.pack $ spToFull neStoreDir spath
+  mapM addStorePath (neStorePath : neReferences)
+  -- Add the deriver path, if it's present. Otherwise an empty string.
+  maybe (addString "") addStorePath neDeriver
+  -- Add 16 zeros: 8 to indicate no signature, and then another 8 to
+  -- indicate the end of the export.
+  add $ replicate 16 0
