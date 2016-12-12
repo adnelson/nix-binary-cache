@@ -8,7 +8,8 @@ import qualified Data.Text as T
 
 import Nix.Nar (Nar, narToBytestring, getNar)
 import Nix.StorePath (StorePath, NixBinDir(..), NixStoreDir, spToFull,
-                      ioParseFullStorePath, nixStoreText, nixStoreBS)
+                      ioParseFullStorePath, nixStoreText, nixStoreBS,
+                      getNixBinDir, getNixStoreDir)
 import Data.ByteString.Builder (toLazyByteString, word64LE)
 
 data NarExport = NarExport {
@@ -42,10 +43,32 @@ getExport nixBin storeDir spath = do
   pure NarExport {neStoreDir = storeDir, neStorePath = spath,
                   neNar = nar, neReferences = refs, neDeriver = deriver}
 
+getExport' :: StorePath -> IO NarExport
+getExport' spath = do
+  nixBin <- getNixBinDir
+  storeDir <- getNixStoreDir
+  getExport nixBin storeDir spath
+
 -- | Get an export as a raw bytestring from the nix-store command.
 getExportRaw :: NixBinDir -> NixStoreDir -> StorePath -> IO ByteString
 getExportRaw nixBin storeDir spath = do
   nixStoreBS nixBin ["--export", spToFull storeDir spath]
+
+getExportRaw' :: StorePath -> IO ByteString
+getExportRaw' spath = do
+  nixBin <- getNixBinDir
+  storeDir <- getNixStoreDir
+  getExportRaw nixBin storeDir spath
+
+
+-- | Magic 8-byte number nix expects at the beginning of an export.
+_EXPORT_MAGIC_1 :: ByteString
+_EXPORT_MAGIC_1 = "\x01\x00\x00\x00\x00\x00\x00\x00"
+
+-- Another magic 8-byte number that comes after the NAR.
+_EXPORT_MAGIC_2 :: ByteString
+_EXPORT_MAGIC_2 = "NIXE\x00\x00\x00\x00"
+
 
 -- | Convert to a ByteString.
 --
@@ -92,10 +115,10 @@ narExportToBytestring NarExport{..} = flip State.execState mempty $ do
       addStorePath sp = addString $ B8.pack $ spToFull neStoreDir sp
 
   -- Magic 8-byte number nix expects at the beginning of an export.
-  add "\x01\x00\x00\x00\x00\x00\x00\x00"
+  add _EXPORT_MAGIC_1
   add $ narToBytestring neNar
   -- Another magic 8-byte number that comes after the NAR.
-  add "NIXE\x00\x00\x00\x00"
+  add _EXPORT_MAGIC_2
   -- Add the store path of the object itself, followed by its references.
   mapM addStorePath (neStorePath : neReferences)
   -- Add the deriver path, if it's present. Otherwise an empty string.

@@ -9,7 +9,7 @@ import qualified Data.ByteString as B
 import Servant (MimeUnrender(..), OctetStream, MimeRender(..))
 
 import Nix.StorePath (NixStoreDir(..), NixBinDir(..), StorePath(..), spToFull,
-                      nixStoreBS)
+                      nixStoreBS, getNixBinDir, getNixStoreDir)
 
 -- | An archived nix store object.
 newtype Nar = Nar ByteString
@@ -27,6 +27,12 @@ instance MimeUnrender OctetStream Nar where
 getNar :: NixBinDir -> NixStoreDir -> StorePath -> IO Nar
 getNar nixBin nsdir spath = Nar <$> nixStoreBS nixBin args where
   args = ["--export", spToFull nsdir spath]
+
+getNar' :: StorePath -> IO Nar
+getNar' spath = do
+  binDir <- getNixBinDir
+  storeDir <- getNixStoreDir
+  getNar binDir storeDir spath
 
 -- | Convert a NAR to a bytestring.
 narToBytestring :: Nar -> ByteString
