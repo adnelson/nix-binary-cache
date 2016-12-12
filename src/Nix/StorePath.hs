@@ -14,6 +14,7 @@ import System.Directory (doesFileExist)
 import System.Exit (ExitCode(..))
 import qualified System.Process.ByteString as PB
 import qualified System.Process.Text as PT
+import qualified Data.ByteString.Char8 as B8
 
 -- | The nix store directory.
 newtype NixStoreDir = NixStoreDir FilePath
@@ -58,7 +59,8 @@ nixStoreBS :: NixBinDir -> [String] -> IO ByteString
 nixStoreBS (NixBinDir nixBin) args = do
   PB.readProcessWithExitCode (nixBin </> "nix-store") args "" >>= \case
     (ExitSuccess, stdout, _) -> pure stdout
-    (ExitFailure code, _, _) -> error $ cmd <> " failed with " <> show code
+    (ExitFailure code, _, stderr) -> error $ unlines $ [
+        cmd <> " failed with " <> show code, "STDERR:", B8.unpack stderr]
       where cmd = "nix-store " <> intercalate " " args
 
 -- | Call `nix-store` with the given arguments, return Text.
@@ -66,9 +68,9 @@ nixStoreText :: NixBinDir -> [String] -> IO Text
 nixStoreText (NixBinDir nixBin) args = do
   PT.readProcessWithExitCode (nixBin </> "nix-store") args "" >>= \case
     (ExitSuccess, stdout, _) -> pure stdout
-    (ExitFailure code, _, _) -> error $ cmd <> " failed with " <> show code
+    (ExitFailure code, _, stderr) -> error $ unlines $ [
+        cmd <> " failed with " <> show code, "STDERR:", unpack stderr]
       where cmd = "nix-store " <> intercalate " " args
-
 
 -- | Parse a nix store path from text. The input text should be a
 -- basepath, not a full path (i.e., it should not be
@@ -128,6 +130,17 @@ findSpBySuffix :: Text -> IO StorePath
 findSpBySuffix prefix = do
   NixStoreDir dir <- getNixStoreDir
   let cmd = "ls " <> dir <> " | grep '" <> unpack prefix <> "$'"
+  result <- readCreateProcess (shell cmd) ""
+  case parseFullStorePath $ pack result of
+    Left err -> error err
+    Right (_, sp) -> return sp
+
+-- | Find a nix store path by some text that appears in the path. If
+-- multiple paths satisfy the search, the first one will be taken.
+findSp :: Text -> IO StorePath
+findSp text = do
+  NixStoreDir dir <- getNixStoreDir
+  let cmd = "ls " <> dir <> " | grep '" <> unpack text <> "'"
   result <- readCreateProcess (shell cmd) ""
   case parseFullStorePath $ pack result of
     Left err -> error err
