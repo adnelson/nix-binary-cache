@@ -8,8 +8,9 @@ import ClassyPrelude
 import qualified Data.ByteString as B
 import Servant (MimeUnrender(..), OctetStream, MimeRender(..))
 
-import Nix.StorePath (NixStoreDir(..), NixBinDir(..), StorePath(..), spToFull,
-                      nixStoreBS, getNixBinDir, getNixStoreDir)
+import Nix.Bin (NixBinDir, nixCmd, getNixBinDir)
+import Nix.StorePath (NixStoreDir(..), StorePath(..), spToFull,
+                      getNixStoreDir)
 
 -- | An archived nix store object.
 newtype Nar = Nar ByteString
@@ -25,7 +26,7 @@ instance MimeUnrender OctetStream Nar where
 
 -- | Ask nix for an archive of a store object.
 getNar :: NixBinDir -> NixStoreDir -> StorePath -> IO Nar
-getNar nixBin nsdir spath = Nar <$> nixStoreBS nixBin args where
+getNar nixBin nsdir spath = Nar <$> nixCmd nixBin "store" args where
   args = ["--dump", spToFull nsdir spath]
 
 -- | Get an export using the default nix store and bin paths.

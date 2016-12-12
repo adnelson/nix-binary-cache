@@ -7,9 +7,9 @@ import qualified Data.ByteString.Lazy.Char8 as LB8
 import qualified Data.Text as T
 
 import Nix.Nar (Nar, narToBytestring, getNar)
-import Nix.StorePath (StorePath, NixBinDir(..), NixStoreDir, spToFull,
-                      ioParseFullStorePath, nixStoreText, nixStoreBS,
-                      getNixBinDir, getNixStoreDir)
+import Nix.Bin (NixBinDir, getNixBinDir, nixCmd)
+import Nix.StorePath (StorePath, NixStoreDir, spToFull,
+                      ioParseFullStorePath, getNixStoreDir)
 import Data.ByteString.Builder (toLazyByteString, word64LE, byteString)
 
 data NarExport = NarExport {
@@ -33,11 +33,8 @@ getExport nixBin storeDir spath = do
   let full = spToFull storeDir spath
   nar <- getNar nixBin storeDir spath
   -- Get references and deriver info from nix-store.
-  refs <- do
-    paths <- T.lines <$> nixStoreText nixBin ["--query", "--references", full]
-    forM paths $ \rawSpath -> do
-      snd <$> ioParseFullStorePath rawSpath
-  deriver <- nixStoreText nixBin ["--query", "--deriver", full] >>= \case
+  refs <- nixCmd nixBin "store" ["--query", "--references", full]
+  deriver <- nixCmd nixBin "store" ["--query", "--deriver", full] >>= \case
     "unknown-deriver\n" -> pure Nothing
     path -> Just . snd <$> ioParseFullStorePath path
   pure NarExport {neStoreDir = storeDir, neStorePath = spath,
@@ -53,7 +50,7 @@ getExport' spath = do
 -- | Get an export as a raw bytestring from the nix-store command.
 getExportRaw :: NixBinDir -> NixStoreDir -> StorePath -> IO ByteString
 getExportRaw nixBin storeDir spath = do
-  nixStoreBS nixBin ["--export", spToFull storeDir spath]
+  nixCmd nixBin "store" ["--export", spToFull storeDir spath]
 
 getExportRaw' :: StorePath -> IO ByteString
 getExportRaw' spath = do

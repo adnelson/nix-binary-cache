@@ -48,6 +48,7 @@ let
     "QuickCheck"
     "hspec"
     "microtimer"
+    "random-strings"
   ];
 
   # Names of extensions that the library uses.

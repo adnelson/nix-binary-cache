@@ -9,7 +9,6 @@ import System.Process (readCreateProcess, shell)
 import System.Environment (getEnv, lookupEnv)
 import Servant (MimeUnrender(..), OctetStream)
 import Servant.HTML.Lucid (HTML)
-import System.FilePath (takeDirectory)
 import System.Directory (doesFileExist)
 import System.Exit (ExitCode(..))
 import qualified System.Process.ByteString as PB
@@ -39,38 +38,6 @@ type FullStorePath = (NixStoreDir, StorePath)
 -- | Read the NIX_STORE variable to get the path to the nix store.
 getNixStoreDir :: IO NixStoreDir
 getNixStoreDir = NixStoreDir <$> getEnv "NIX_STORE"
-
--- | Path to the directory containing nix binaries.
-newtype NixBinDir = NixBinDir FilePath deriving (Show, Eq, IsString)
-
--- | Get the nix binary directory path, e.g. where `nix-store` lives.
-getNixBinDir :: IO NixBinDir
-getNixBinDir = lookupEnv "NIX_BIN_DIR" >>= \case
-  Just dir -> doesFileExist (dir </> "nix-store") >>= \case
-    True -> pure $ NixBinDir dir
-    False -> findit
-  Nothing -> findit
-  where
-    cmd = shell "which nix-store"
-    findit = NixBinDir . takeDirectory <$> readCreateProcess cmd ""
-
--- | Call `nix-store` with the given arguments, return a ByteString.
-nixStoreBS :: NixBinDir -> [String] -> IO ByteString
-nixStoreBS (NixBinDir nixBin) args = do
-  PB.readProcessWithExitCode (nixBin </> "nix-store") args "" >>= \case
-    (ExitSuccess, stdout, _) -> pure stdout
-    (ExitFailure code, _, stderr) -> error $ unlines $ [
-        cmd <> " failed with " <> show code, "STDERR:", B8.unpack stderr]
-      where cmd = "nix-store " <> intercalate " " args
-
--- | Call `nix-store` with the given arguments, return Text.
-nixStoreText :: NixBinDir -> [String] -> IO Text
-nixStoreText (NixBinDir nixBin) args = do
-  PT.readProcessWithExitCode (nixBin </> "nix-store") args "" >>= \case
-    (ExitSuccess, stdout, _) -> pure stdout
-    (ExitFailure code, _, stderr) -> error $ unlines $ [
-        cmd <> " failed with " <> show code, "STDERR:", unpack stderr]
-      where cmd = "nix-store " <> intercalate " " args
 
 -- | Parse a nix store path from text. The input text should be a
 -- basepath, not a full path (i.e., it should not be
