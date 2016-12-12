@@ -70,13 +70,10 @@ _EXPORT_MAGIC_1 = "\x01\x00\x00\x00\x00\x00\x00\x00"
 _EXPORT_MAGIC_2 :: ByteString
 _EXPORT_MAGIC_2 = "NIXE\x00\x00\x00\x00"
 
-
--- | Convert to a ByteString.
+-- | Convert a NarExport to a ByteString.
 --
--- Nix exports are a binary format. The input to this function is
--- a bytestring intended to have been created from a call to
--- `nix-store --dump`, or equivalently, as returned by a nix
--- binary cache. The logic of this function adds a few things:
+-- Nix exports are a binary format. The logic of this function
+-- serializes the NarExport, including:
 --
 -- * An 8-byte magic header, which nix-store reads when it imports.
 -- * The bytes of the NAR itself.
@@ -97,7 +94,7 @@ _EXPORT_MAGIC_2 = "NIXE\x00\x00\x00\x00"
 -- of 8 bytes. So for example, the string "hello" would be
 -- represented as
 --
---   "\x05\x00\x00\x00\x00\x00\x00\x00hello\x00\x00\x00"
+--   "\x05\NUL\NUL\NUL\NUL\NUL\NUL\NULhello\NUL\NUL\NUL"
 --
 -- Note that there are three zeros following the "hello" text, in
 -- order to pad it to eight bytes.
