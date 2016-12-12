@@ -1,12 +1,13 @@
 module Nix.Cache.API where
 
-import ClassyPrelude (Vector, FilePath, HashMap, Bool, Text)
+import ClassyPrelude (Vector, FilePath, HashMap, Bool)
 import Servant
 import Servant.HTML.Lucid (HTML)
 
 import Nix.Nar
 import Nix.StorePath
 import Nix.Cache.Types
+import Nix.NarInfo
 
 -- | Due to AWS S3, we have to support a bogus 'binary/octet-stream'
 -- content type. The `OStream` type thus represents something which is

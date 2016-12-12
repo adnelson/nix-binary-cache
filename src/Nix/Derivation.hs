@@ -1,5 +1,11 @@
 -- | Nix derivations.
-module Nix.Derivation where
+module Nix.Derivation (
+  module Nix.Derivation.Types,
+  parseDerivFromPath,
+  parseDerivFromPath',
+  parseDerivFromPrefix,
+  derivInputs, derivGetEnv, derivGetOut
+  ) where
 
 import ClassyPrelude
 import qualified Data.HashMap.Strict as H
@@ -8,6 +14,7 @@ import qualified Data.HashSet as HS
 import Nix.Derivation.Types
 import Nix.Derivation.Parser
 import Nix.StorePath
+import Nix.FileHash
 
 -- | Parse a derivation file. Assumes the file exists and parses correctly.
 parseDerivFromPath :: NixStoreDir -> StorePath -> IO Derivation
@@ -34,3 +41,9 @@ derivInputs storeDir Derivation{..} = HS.fromList . concat <$> do
   forM (H.toList derivInputDerivations) $ \(dpath, outNames) -> do
     deriv <- parseDerivFromPath storeDir dpath
     pure $ catMaybes $ lookupOutput deriv <$> outNames
+
+derivGetEnv :: Text -> Derivation -> Maybe Text
+derivGetEnv key = H.lookup key . derivEnv
+
+derivGetOut :: OutputName -> Derivation -> Maybe (StorePath, Maybe FileHash)
+derivGetOut outName = H.lookup outName . derivOutputs

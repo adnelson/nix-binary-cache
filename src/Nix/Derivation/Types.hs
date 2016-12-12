@@ -31,7 +31,7 @@ data Derivation = Derivation {
   } deriving (Show, Eq, Generic)
 
 newtype OutputName = OutputName {outputName::Text}
-  deriving (Show, Eq, Ord, Hashable)
+  deriving (Show, Eq, Ord, Hashable, IsString)
 
 -- | Given a derivation and an output name, return the path that the
 -- output will correspond to.
