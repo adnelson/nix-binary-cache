@@ -3,3 +3,4 @@ dist
 *.hi
 .bin
 .ghci
+nix-binary-cache.cabal

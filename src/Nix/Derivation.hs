@@ -1,7 +1,8 @@
 -- | Nix derivations.
 module Nix.Derivation where
 
-import ClassyPrelude hiding (try)
+import ClassyPrelude hiding (try, readFile)
+import Prelude (readFile)
 import Text.Parsec
 import qualified Data.Text as T
 import qualified Data.HashMap.Strict as H
