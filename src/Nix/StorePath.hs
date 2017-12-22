@@ -6,6 +6,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Text.Regex.PCRE.Heavy (scan, re)
 import System.Process (readCreateProcess, shell)
+import System.FilePath (takeFileName, takeDirectory, isAbsolute)
 import System.Environment (getEnv)
 import Servant (MimeUnrender(..), OctetStream)
 import Servant.HTML.Lucid (HTML)
@@ -14,9 +15,13 @@ import Servant.HTML.Lucid (HTML)
 newtype NixStoreDir = NixStoreDir FilePath
   deriving (Show, Eq, Generic, Hashable, IsString)
 
+-- | The 32-character prefix of an object in the nix store.
+newtype StorePrefix = StorePrefix Text
+  deriving (Show, Eq, Generic, Hashable, IsString)
+
 -- | The hash and name of an object in the nix store.
-data StorePath = StorePath Text Text
-  deriving (Show, Eq, Ord, Generic)
+data StorePath = StorePath StorePrefix Text
+  deriving (Show, Eq, Generic)
 
 instance Hashable StorePath
 
@@ -40,16 +45,17 @@ getNixStoreDir = NixStoreDir <$> getEnv "NIX_STORE"
 parseStorePath :: Text -> Either String StorePath
 parseStorePath txt =
   case scan [re|^([\w\d]{32})-(.*)|] txt of
-    [(_, [hash, name])] -> Right $ StorePath hash name
+    [(_, [StorePrefix -> hash, name])] -> Right $ StorePath hash name
     _ -> Left $ show txt <> " does not appear to be a store basepath"
 
 -- | Parse a store path from text. Probably not super efficient but oh well.
 parseFullStorePath :: Text -> Either String FullStorePath
-parseFullStorePath txt = case unsnoc $ T.split (=='/') txt of
-  Nothing -> Left $ show txt <> " does not appear to be a store path"
-  Just (intercalate "/" -> unpack -> storeDir, pathInStore) -> do
-    basepath <- parseStorePath pathInStore
-    return (NixStoreDir storeDir, basepath)
+parseFullStorePath (T.unpack -> p) = case (takeDirectory p, takeFileName p) of
+  (d, _) | not (isAbsolute d) -> Left "store path must be absolute"
+  (_, "") -> Left ("basename of store path " <> show p <> " is empty")
+  (storeDir, base) -> do
+    storePath <- parseStorePath (T.pack base)
+    pure (NixStoreDir storeDir, storePath)
 
 -- | Parse a StorePath in the IO monad.
 ioParseStorePath :: MonadIO io => Text -> io StorePath
@@ -73,7 +79,7 @@ spToFull' = uncurry spToFull
 
 -- | Convert a StorePath to a FilePath.
 spToPath :: StorePath -> FilePath
-spToPath (StorePath hash name) = unpack $ hash <> "-" <> name
+spToPath (StorePath (StorePrefix hash) name) = unpack $ hash <> "-" <> name
 
 -- | Find a nix store path by its store prefix. If multiple paths
 -- satisfy the prefix, the first one will be taken.
@@ -111,7 +117,7 @@ findSp text = do
 -- | Return an abbreviated version of a store path, e.g. for
 -- debugging. Uses only the first 6 characters of the prefix.
 abbrevSP :: StorePath -> Text
-abbrevSP (StorePath hash name) = T.take 6 hash <> "-" <> name
+abbrevSP (StorePath (StorePrefix hash) name) = T.take 6 hash <> "-" <> name
 
 instance MimeUnrender OctetStream StorePath where
   mimeUnrender _ = map snd . parseFullStorePath . T.decodeUtf8 . toStrict

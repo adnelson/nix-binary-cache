@@ -1,7 +1,8 @@
 -- | Functions for parsing a nix derivation.
 module Nix.Derivation.Parser where
 
-import ClassyPrelude hiding (try)
+import ClassyPrelude hiding (try, readFile)
+import Prelude (readFile)
 import Text.Parsec
 import qualified Data.HashMap.Strict as H
 
