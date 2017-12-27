@@ -12,6 +12,7 @@ import Codec.Compression.GZip (compress, decompress)
 
 import Data.KVMap
 import Nix.Cache.Common
+import Nix.StorePath (StorePrefix(..))
 
 -- | Type to represent the binary/octet-stream content type, which is
 -- equivalent to application/octet-stream.
@@ -70,10 +71,6 @@ instance MimeUnrender OctetStream NixCacheInfo where
   mimeUnrender _ bstring = case parse parseKVMap bstring of
     Done _ kvmap -> fromKVMap kvmap
     Fail _ _ message -> Left message
-
--- | The 32-character prefix of an object in the nix store.
-newtype StorePrefix = StorePrefix Text
-  deriving (Show, Eq, Generic)
 
 -- | Requesting information about a nix archive, by providing its store prefix.
 newtype NarInfoReq = NarInfoReq StorePrefix

@@ -1,30 +1,30 @@
 module Nix.Cache.Client where
 
-import Servant.Client (BaseUrl(..), client, ServantError, Scheme(..))
-import Network.HTTP.Client (Manager, Request(..), ManagerSettings(..),
-                            newManager, defaultManagerSettings)
+import ClassyPrelude (writeFile)
+import Control.Concurrent.Async.Lifted (wait)
+import Control.Monad.State.Strict (execStateT, modify)
+import GHC.Conc (getNumProcessors)
+import Network.HTTP.Client (Manager, Request(..), ManagerSettings(..))
+import Network.HTTP.Client (newManager, defaultManagerSettings)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
-import Control.Monad.Trans.Except (ExceptT, runExceptT)
-import qualified Control.Monad.State.Strict as State
-import Servant (Proxy(..), (:<|>)(..))
+import Servant ((:<|>)(..), Proxy(Proxy))
+import Servant.Client (BaseUrl(..), ClientM, ClientEnv(ClientEnv), Scheme(..))
+import Servant.Client (runClientM, client, )
 import Servant.Common.BaseUrl (parseBaseUrl)
-import System.Process (readCreateProcess, shell)
+import System.Exit (ExitCode(ExitSuccess, ExitFailure))
+import System.Directory (createDirectoryIfMissing, renameDirectory)
+import System.Directory (doesDirectoryExist)
+import System.Environment (getEnv, lookupEnv)
 import System.Process.Text (readProcessWithExitCode)
-import System.Directory (createDirectoryIfMissing,
-                         renameDirectory,
-                         doesDirectoryExist)
+import System.Process (readCreateProcess, shell)
 import qualified Data.ByteString.Base64 as B64
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as T
 import qualified Data.HashMap.Strict as H
 import qualified Data.HashSet as HS
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
 import qualified Data.Vector as V
-import System.Environment (getEnv, lookupEnv)
-import Control.Concurrent.Async.Lifted.Safe (wait)
-import GHC.Conc (getNumProcessors)
-import System.Exit (ExitCode(..))
 
-import Nix.Cache.Common
+import Nix.Cache.Common -- hiding (writeFile)
 import Nix.Cache.API
 import Nix.StorePath
 import Nix.Cache.Types
@@ -36,15 +36,12 @@ import Nix.Bin
 -- * Servant client
 -------------------------------------------------------------------------------
 
--- Make a client request returning a `t`.
-type ClientReq t = Manager -> BaseUrl -> ExceptT ServantError IO t
-
 -- | Define the client by pattern matching.
-nixCacheInfo :: ClientReq NixCacheInfo
-narInfo :: NarInfoReq -> ClientReq NarInfo
-nar :: NarRequest -> ClientReq Nar
-queryPaths :: Vector FilePath -> ClientReq (HashMap FilePath Bool)
-sendNar :: Nar -> ClientReq StorePath
+nixCacheInfo :: ClientM NixCacheInfo
+narInfo :: NarInfoReq -> ClientM NarInfo
+nar :: NarRequest -> ClientM Nar
+queryPaths :: Vector FilePath -> ClientM (HashMap FilePath Bool)
+sendNar :: Nar -> ClientM StorePath
 nixCacheInfo
   :<|> narInfo
   :<|> nar
@@ -80,6 +77,8 @@ nixCacheUrlFromEnv = getEnv "NIX_REPO_HTTP" >>= parseBaseUrl
 
 -------------------------------------------------------------------------------
 -- * Local filesystem cache for path references
+
+-- TODO: use sqlite
 -------------------------------------------------------------------------------
 
 -- | Write a path tree to the cache.
@@ -114,7 +113,7 @@ writeCacheFor path refs = do
       tempDir <- T.unpack . T.strip . T.pack <$>
         readCreateProcess (shell $ "mktemp -d " <> pathDir <> "XXXX") ""
       forM_ refs $ \ref -> do
-        writeFile (tempDir </> spToPath ref) ("" :: String)
+        writeFile (tempDir </> spToPath ref) ""
       renameDirectory tempDir pathDir
       -- Make the directory read-only.
       readCreateProcess (shell $ "chmod 0555 " <> pathDir) ""
@@ -286,12 +285,12 @@ mkManager config = do
   newManager managerSettings {managerModifyRequest = modifyReq}
 
 -- | Perform a request with the servant client in the NixClient monad.
-clientRequest :: ClientReq a -> NixClient a
+clientRequest :: ClientM a -> NixClient a
 clientRequest req = do
   config <- ncoConfig <$> ask
   manager <- ncoManager <$> ask
-  let baseUrl = nccCacheUrl config
-  liftIO $ runExceptT (req manager baseUrl) >>= \case
+  let env = ClientEnv manager (nccCacheUrl config)
+  liftIO $ runClientM req env >>= \case
     Left err -> error $ show err
     Right result -> pure result
 
@@ -366,10 +365,10 @@ queryStorePaths paths = do
   -- server to see which paths are already there.
   response <- clientRequest $ queryPaths pathsV
   -- Split the dictionary into two lists.
-  result <- flip State.execStateT (mempty, mempty) $ do
+  result <- flip execStateT (mempty, mempty) $ do
     forM_ (H.toList response) $ \(pathStr, isInRepo) -> do
       spath <- snd <$> ioParseFullStorePath (pack pathStr)
-      State.modify $ \(inrepo, notinrepo) -> case isInRepo of
+      modify $ \(inrepo, notinrepo) -> case isInRepo of
         True -> (HS.insert spath inrepo, notinrepo)
         False -> (inrepo, HS.insert spath notinrepo)
   ncDebug $ count (fst result) <> " paths are already on the repo, and "

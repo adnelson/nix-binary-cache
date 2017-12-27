@@ -11,7 +11,9 @@ let
     "aeson"
     "attoparsec"
     "base"
+    "binary"
     "bytestring"
+    "bytestring-conversion"
     "base64-bytestring"
     "classy-prelude"
     "directory"
@@ -110,7 +112,7 @@ let
     # Enable optimization
     "-O3"
     # Turn warnings into errors.
-    "-Werror"
+    # "-Werror"
   ];
 
   # Options for ghc when just testing.
@@ -135,8 +137,7 @@ let
       "import qualified Data.Text.Encoding as T"
       "import qualified Data.HashMap.Strict as H"
       "import ClassyPrelude"
-      "import System.Microtimer"
-      "import Control.Concurrent.Async.Lifted.Safe"
+      "import Control.Concurrent.Async.Lifted"
       ""
     ]
   ));
@@ -163,6 +164,16 @@ let
       default-language:    Haskell2010
       default-extensions:  ${joinCommas extensions}
       ghc-options:         -O3 ${joinSpaces ghc-build-options}
+
+    ${if false then "" else ''
+    executable nar-parse
+      main-is:             Nix/PrintNar.hs
+      build-depends:       ${joinCommas dependencies}
+      hs-source-dirs:      src
+      default-language:    Haskell2010
+      default-extensions:  ${joinCommas extensions}
+      ghc-options:         -O3 ${joinSpaces ghc-build-options}
+    ''}
 
     ${if true then "" else ''
     executable nix-server
