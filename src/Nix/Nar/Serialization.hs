@@ -5,14 +5,15 @@ module Nix.Nar.Serialization where
 import ClassyPrelude hiding (take, try, Builder)
 import Data.Binary
 import Data.Binary.Get (getInt64le, getByteString, skip, lookAhead, label)
+import Data.Binary.Get (runGetOrFail)
 import Data.Binary.Put (Put, putByteString, putInt64le, execPut)
-import Data.ByteString.Builder (Builder, toLazyByteString, byteString)
-import Data.Attoparsec.ByteString (Parser, take, many', try, choice, string)
-import Data.Attoparsec.Lazy (Result(Fail, Done), parse)
+import Data.ByteString.Builder (toLazyByteString)
+-- import Data.Attoparsec.ByteString (Parser, take, many', try, choice, string)
+-- import Data.Attoparsec.Lazy (Result(Fail, Done), parse)
 import qualified Data.HashMap.Strict as H
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
-import qualified Data.ByteString.Lazy as BL
+-- import qualified Data.ByteString.Lazy as BL
 import Servant (MimeUnrender(..), OctetStream, MimeRender(..))
 
 
@@ -20,159 +21,8 @@ import Nix.StorePath (NixStoreDir(..), StorePath(..))
 import Nix.StorePath (parseFullStorePath, spToFull)
 import Nix.Nar.Types
 
-parseNumber :: Parser Int
-parseNumber = do
-  let step (r, m) d = (r + m * fromIntegral d, m * 256)
-      calc bs = fst $ B.foldl' step (0, 1) bs
-  calc <$> take 8
-
-parseSomeString :: Parser B.ByteString
-parseSomeString = do
-  stringlength <- parseNumber
-  result <- take stringlength
-  -- string length is padded to a multiple of 8, so consume remaining input
-  when (stringlength `mod` 8 /= 0) $ do
-    void $ take (8 - stringlength `mod` 8)
-  pure result
-
-parseString :: B.ByteString -> Parser ()
-parseString bs = parseSomeString >>= \case
-  bs' | bs == bs' -> pure ()
-  bs' -> fail ("expected string " <> show bs <> " but got " <> show bs')
-
-parseParens :: Parser a -> Parser a
-parseParens p = parseString "(" *> p <* parseString ")"
-
-parseDirectory :: Parser (HashMap B.ByteString NarElement)
-parseDirectory = H.fromList <$> many' entry where
-  entry = try $ do
-    parseString "entry"
-    parseParens $ do
-      name <- parseString "name" *> parseSomeString
-      element <- parseString "node" *> parseElement
-      pure (name, element)
-
-parseElement :: Parser NarElement
-parseElement = parseParens $ do
-  parseString "type"
-  parseSomeString >>= \case
-    "directory" -> NarDirectory <$> parseDirectory
-    "symlink" -> NarSymLink <$> (parseString "target" *> parseSomeString)
-    "regular" -> do
-      -- Figure out if this is executable or not
-      isExecutable <- choice [
-        parseString "executable" *> parseString "" *> pure Executable,
-        pure NotExecutable
-        ]
-      NarFile isExecutable <$> (parseString "contents" *> parseSomeString)
-    t -> do
-      fail ("unsupported element type: " <> show t)
-
-parseNar :: Parser Nar
-parseNar = Nar <$> (parseString "nix-archive-1" *> parseElement)
-
-parseStorePathAndNixStore :: Parser (NixStoreDir, StorePath)
-parseStorePathAndNixStore = do
-  raw <- parseSomeString
-  case parseFullStorePath (decodeUtf8 raw) of
-    Left err -> fail err
-    Right result -> pure result
-
-parseNarExport :: Parser NarExport
-parseNarExport = do
-  -- magic constant at the beginning of an export
-  string $ B.pack (1 : replicate 7 0)
-  -- after that comes the NAR itself
-  neNar <- parseNar
-  -- magic constant for the export metadata
-  string $ "NIXE" <> B.replicate 4 0
-  -- Get the store path of the exported object
-  (neStoreDirectory, neStorePath) <- parseStorePathAndNixStore
-  -- Get the references
-  neReferences <- do
-    numReferences <- parseNumber
-    forM [0 .. (numReferences - 1)] $ \_ -> do
-      snd <$> parseStorePathAndNixStore
-  -- Get the deriver (optional)
-  neDeriver <- parseSomeString >>= \case
-    "" -> pure Nothing
-    raw -> case parseFullStorePath (decodeUtf8 raw) of
-      Left err -> fail err
-      Right (_, path) -> pure $ Just path
-  -- Get the signature (optional)
-  neSignature <- parseNumber >>= \case
-    0 -> pure Nothing
-    1 -> Just <$> parseSomeString
-    n -> fail ("Expected either 0 or 1 before the signature, got " <> show n)
-  pure NarExport {..}
-
-parseConsumeInput :: Parser t -> BL.ByteString -> Either String t
-parseConsumeInput parser bs = case parse parser bs of
-  Done "" result -> pure result
-  Done _ _ -> Left "There is remaining input"
-  Fail _ _ err -> Left err
-
-instance MimeUnrender OctetStream Nar where
-  mimeUnrender _ = parseConsumeInput parseNar
-
-instance MimeUnrender OctetStream NarExport where
-  mimeUnrender _ = parseConsumeInput parseNarExport
-
-
--- | Convert an integer to a bytestring, 8 little-endian word8s
-intToChunks :: Int -> ByteString -- [Word8]
-intToChunks n = pack $ reverse $ go (1 :: Integer) n [] where
-  go 9 _ octets = octets
-  go k n' octets = go (k + 1) (n' `div` 256)
-                      (fromIntegral (n' `mod` 256) : octets)
-
--- | Zero-pad a bytestring so that its length is a multiple of 8.
-padTo8 :: ByteString -> ByteString
-padTo8 bs | length bs `mod` 8 == 0 = bs
-padTo8 bs = bs <> replicate (8 - (length bs `mod` 8)) 0
-
-narBuildString :: ByteString -> Builder
-narBuildString bs = do
-  byteString (intToChunks $ length bs) <> byteString (padTo8 bs)
-
-elementToBuilder :: NarElement -> Builder
-elementToBuilder element = do
-  let
-    internal = case element of
-      NarSymLink target -> concat [narBuildString "type",
-                                   narBuildString "symlink",
-                                   narBuildString "target",
-                                   narBuildString target]
-      NarFile NotExecutable contents -> concat [narBuildString "type",
-                                                narBuildString "regular",
-                                                narBuildString "contents",
-                                                narBuildString contents]
-      NarFile Executable contents -> concat [narBuildString "type",
-                                             narBuildString "regular",
-                                             narBuildString "executable",
-                                             narBuildString "",
-                                             narBuildString "contents",
-                                             narBuildString contents]
-      NarDirectory elements -> concat $ [
-        narBuildString "type",
-        narBuildString "directory",
-        concat $ do
-          flip map (sortOn fst $ H.toList elements) $ \(name, element) -> do
-            concat [
-              narBuildString "entry",
-              narBuildString "(",
-              narBuildString "name",
-              narBuildString name,
-              narBuildString "node"
-              ] <> elementToBuilder element <> narBuildString ")"
-       ]
-  narBuildString "(" <> internal <> narBuildString ")"
-
 -- | Wrap the Int64 type to create custom Binary instance
 newtype NarInt = NarInt Int deriving (Show, Eq, Ord, Num)
-
-nlength :: MonoFoldable m => m -> NarInt
-nlength = NarInt . length
 
 -- NarInts are written as a 8 bytes in little endian format
 instance Binary NarInt where
@@ -182,7 +32,10 @@ instance Binary NarInt where
 -- | Wrap to create custom Binary instance
 newtype NarString = NarString ByteString deriving (Show, Eq, Ord, IsString)
 instance Binary NarString where
-  put (NarString s) = put (nlength s) *> putByteString (padTo8 s)
+  put (NarString s) = put (NarInt $ length s) *> putByteString (padTo8 s)
+    where padTo8 bs | length bs `mod` 8 == 0 = bs
+          padTo8 bs = bs <> replicate (8 - (length bs `mod` 8)) 0
+
   get = do
     -- Get the length of the string
     NarInt len <- get
@@ -340,3 +193,16 @@ instance Binary NarExport where
 
 instance MimeRender OctetStream Nar where
   mimeRender _ = toLazyByteString . execPut . put
+
+instance MimeUnrender OctetStream Nar where
+  mimeUnrender _ bs = case runGetOrFail get bs of
+    Right (_, _, nar) -> pure nar
+    Left (_, _, err) -> Left err
+
+instance MimeRender OctetStream NarExport where
+  mimeRender _ = toLazyByteString . execPut . put
+
+instance MimeUnrender OctetStream NarExport where
+  mimeUnrender _ bs = case runGetOrFail get bs of
+    Right (_, _, export) -> pure export
+    Left (_, _, err) -> Left err
