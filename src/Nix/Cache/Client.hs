@@ -1,6 +1,5 @@
 module Nix.Cache.Client where
 
-import ClassyPrelude (writeFile)
 import Control.Concurrent.Async.Lifted (wait)
 import Control.Monad.State.Strict (execStateT, modify)
 import GHC.Conc (getNumProcessors)
@@ -12,11 +11,8 @@ import Servant.Client (BaseUrl(..), ClientM, ClientEnv(ClientEnv), Scheme(..))
 import Servant.Client (runClientM, client, )
 import Servant.Common.BaseUrl (parseBaseUrl)
 import System.Exit (ExitCode(ExitSuccess, ExitFailure))
-import System.Directory (createDirectoryIfMissing, renameDirectory)
-import System.Directory (doesDirectoryExist)
-import System.Environment (getEnv, lookupEnv)
+import System.Environment (lookupEnv)
 import System.Process.Text (readProcessWithExitCode)
-import System.Process (readCreateProcess, shell)
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.HashMap.Strict as H
 import qualified Data.HashSet as HS
@@ -24,9 +20,12 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Vector as V
 
-import Nix.Cache.Common -- hiding (writeFile)
+import Nix.Cache.Common
 import Nix.Cache.API
-import Nix.StorePath
+import Nix.StorePath (NixStoreDir, StorePath, PathSet)
+import Nix.StorePath (ioParseFullStorePath, spToFull)
+import Nix.StorePath (getNixStoreDir, abbrevSP)
+import Nix.ReferenceCache
 import Nix.Cache.Types
 import Nix.Nar
 import Nix.NarInfo
@@ -73,77 +72,11 @@ authFromEnv = do
 
 -- | Read nix cache url from the environment.
 nixCacheUrlFromEnv :: IO BaseUrl
-nixCacheUrlFromEnv = getEnv "NIX_REPO_HTTP" >>= parseBaseUrl
-
--------------------------------------------------------------------------------
--- * Local filesystem cache for path references
-
--- TODO: use sqlite
--------------------------------------------------------------------------------
-
--- | Write a path tree to the cache.
--- Iterates through keys of the path tree, for each one creates a
--- directory for the base path of the store path, and touches files
--- corresponding to paths of its dependencies.
--- So for example, if /nix/store/xyz-foo depends on /nix/store/{a,b,c},
--- then we will create
---   cacheLocation/xyz-foo/a
---   cacheLocation/xyz-foo/b
---   cacheLocation/xyz-foo/c
-writeCache :: NixClient ()
-writeCache = do
-  cacheLocation <- nccCacheLocation <$> ncoConfig <$> ask
-  mv <- ncoState <$> ask
-  tree <- ncsPathTree <$> readMVar mv
-  liftIO $ createDirectoryIfMissing True cacheLocation
-  forM_ (H.toList tree) $ \(path, refs) -> do
-    writeCacheFor path refs
-
--- Write the on-disk cache entry for a single path.
-writeCacheFor :: StorePath -> [StorePath] -> NixClient ()
-writeCacheFor path refs = do
-  cacheLocation <- nccCacheLocation <$> ncoConfig <$> ask
-  let pathDir = cacheLocation </> spToPath path
-  liftIO (doesDirectoryExist pathDir) >>= \case
-    True -> pure ()
-    False -> liftIO $ do
-      -- Build the cache in a temporary directory, and then move it
-      -- to the actual location. This prevents the creation of a
-      -- partial directory in the case of a crash.
-      tempDir <- T.unpack . T.strip . T.pack <$>
-        readCreateProcess (shell $ "mktemp -d " <> pathDir <> "XXXX") ""
-      forM_ refs $ \ref -> do
-        writeFile (tempDir </> spToPath ref) ""
-      renameDirectory tempDir pathDir
-      -- Make the directory read-only.
-      readCreateProcess (shell $ "chmod 0555 " <> pathDir) ""
-      pure ()
-
--- | Read the references of a single path from the cache, if they exist.
-getReferencesFromCache :: StorePath -> NixClient (Maybe [StorePath])
-getReferencesFromCache spath = do
-  ncDebug $ "Querying cache for references of " <> abbrevSP spath
-  cacheLocation <- nccCacheLocation <$> ncoConfig <$> ask
-  liftIO $ do
-    doesDirectoryExist (cacheLocation </> spToPath spath) >>= \case
-      True -> Just <$> do
-        refStrs <- map pack <$> listDirectory cacheLocation
-        mapM ioParseStorePath refStrs
-      False -> pure Nothing
-
--- | Load a cache from disk into memory.
-loadCache :: FilePath -> IO PathTree
-loadCache cacheLocation = doesDirectoryExist cacheLocation >>= \case
-  False -> pure mempty
-  True -> do
-    paths <- listDirectory cacheLocation
-    map H.fromList $ forM paths $ \path -> do
-      bpath <- ioParseStorePath $ pack path
-      deps <- do
-        depfiles <- listDirectory (cacheLocation </> path)
-        mapM (ioParseStorePath . pack) depfiles
-      pure (bpath, deps)
-
+nixCacheUrlFromEnv = do
+  base <- lookupEnv "NIX_REPO_HTTP" >>= \case
+    Nothing -> pure "https://cache.nixos.org"
+    Just url -> pure url
+  parseBaseUrl base
 
 -------------------------------------------------------------------------------
 -- * Nix client monad
@@ -155,21 +88,20 @@ data NixClientConfig = NixClientConfig {
   -- ^ Location of the nix store.
   nccBinDir :: NixBinDir,
   -- ^ Location of nix binaries.
-  nccCacheLocation :: FilePath,
-  -- ^ Location of the nix client path cache.
   nccCacheUrl :: BaseUrl,
   -- ^ Base url of the nix binary cache.
   nccCacheAuth :: Maybe NixCacheAuth,
   -- ^ Optional auth for the nix cache, if using HTTPS.
+  nccMaxWorkers :: Int,
+  -- ^ Max number of concurrent tasks
   nccLogLevel :: LogLevel
   -- ^ Minimum level of logging messages to show.
   } deriving (Show, Generic)
 
 -- | State for the nix client monad.
 data NixClientState = NixClientState {
-  ncsPathTree :: PathTree,
   -- ^ Computed store path dependency tree.
-  ncsSentPaths :: HashMap StorePath (Async ())
+  ncsSentPaths :: !(HashMap StorePath (Async ()))
   -- ^ Mapping of store paths to asynchronous actions which send those paths.
   } deriving (Generic)
 
@@ -181,6 +113,9 @@ data NixClientObj = NixClientObj {
   -- ^ Mutable state of the client.
   ncoManager :: Manager,
   -- ^ HTTP connection manager client uses to connect.
+  ncoPathReferenceCache :: NixPathReferenceCache,
+  -- ^ Database connection for the local cache. Syncronized in MVar to
+  -- allow lastrowid to be deterministic
   ncoLogMutex :: MVar (),
   -- ^ Syncronizes logs of the client so they don't overlap.
   ncoSemaphore :: QSem
@@ -189,37 +124,33 @@ data NixClientObj = NixClientObj {
 -- | Nix client monad.
 type NixClient = ReaderT NixClientObj IO
 
+loadClientConfig :: IO NixClientConfig
+loadClientConfig = do
+  nccStoreDir <- getNixStoreDir
+  nccCacheUrl <- nixCacheUrlFromEnv
+  nccCacheAuth <- authFromEnv
+  nccMaxWorkers <- (>>= readMay) <$> lookupEnv "MAX_WORKERS" >>= \case
+    Just n | n > 0 -> return n
+    _ -> getNumProcessors
+  nccLogLevel <- (>>= readMay) <$> lookupEnv "LOG_LEVEL" >>= \case
+    Just level -> pure level
+    _ -> return LOG_INFO
+  nccBinDir <- getNixBinDir
+  pure NixClientConfig {..}
+
 -- | Run the nix client monad.
 runNixClient :: NixClient a -> IO a
 runNixClient action = do
-  storeDir <- getNixStoreDir
-  home <- getEnv "HOME"
-  cacheUrl <- nixCacheUrlFromEnv
-  cacheAuth <- authFromEnv
-  maxWorkers <- (>>= readMay) <$> lookupEnv "MAX_WORKERS" >>= \case
-    Just n | n > 0 -> return n
-    _ -> getNumProcessors
-  minLogLevel <- (>>= readMay) <$> lookupEnv "LOG_LEVEL" >>= \case
-    Just level -> pure level
-    _ -> return LOG_INFO
-  binDir <- getNixBinDir
-  semaphore <- newQSem maxWorkers
-  let cfg = NixClientConfig {
-        nccStoreDir = storeDir,
-        nccBinDir = binDir,
-        nccCacheLocation = home </> ".nix-path-cache",
-        nccCacheUrl = cacheUrl,
-        nccCacheAuth = cacheAuth,
-        nccLogLevel = minLogLevel
-        }
+  cfg <- loadClientConfig
+  semaphore <- newQSem (nccMaxWorkers cfg)
   manager <- mkManager cfg
-  let state = NixClientState mempty mempty
+  let state = NixClientState mempty
   stateMVar <- newMVar state
   logMVar <- newMVar ()
-  -- TODO make this configurable
-  let obj = NixClientObj cfg stateMVar manager logMVar semaphore
+  cache <- newPathReferenceCache
+  let obj = NixClientObj cfg stateMVar manager cache logMVar semaphore
   -- Perform the action and then update the cache.
-  result <- runReaderT (action <* writeCache) obj
+  result <- runReaderT (action) obj
   pure result
 
 -------------------------------------------------------------------------------
@@ -298,36 +229,11 @@ clientRequest req = do
 -- * Nix client actions
 -------------------------------------------------------------------------------
 
--- | Get the references of an object by asking the nix-store. This
--- information is cached by the caller of this function.
-getReferencesFromNix :: StorePath -> NixClient [StorePath]
-getReferencesFromNix spath = do
-  ncDebug $ "Querying nix-store for references of " <> abbrevSP spath
-  storeDir <- nccStoreDir <$> ncoConfig <$> ask
-  let cmd = "nix-store --query --references " <> spToFull storeDir spath
-  result <- liftIO $ pack <$> readCreateProcess (shell $ unpack cmd) ""
-  forM (splitWS result) $ \line -> case parseFullStorePath line of
-    Left err -> error err
-    Right (_, sp) -> pure sp
-
 -- | Get references of a path, reading from and writing to a cache.
-getReferences :: StorePath -> NixClient [StorePath]
+getReferences :: StorePath -> NixClient PathSet
 getReferences spath = do
-  mv <- asks ncoState
-  modifyMVar mv $ \s -> do
-    -- Adds some new references to the path tree.
-    let addRefs refs = s {ncsPathTree = H.insert spath refs $ ncsPathTree s}
-    case lookup spath $ ncsPathTree s of
-      Just refs -> pure (s, refs)
-      -- Next check the on-disk cache.
-      Nothing -> getReferencesFromCache spath >>= \case
-        Just refs -> pure (addRefs refs, refs)
-        -- If it's still not there, then ask nix-store for the references.
-        Nothing -> do
-          refs' <- getReferencesFromNix spath
-          -- Filter out self-referential paths.
-          let refs = filter (/= spath) refs'
-          pure (addRefs refs, refs)
+  cache <- ncoPathReferenceCache <$> ask
+  liftIO $ getPathReferences cache spath
 
 -- | Get the full runtime path dependency closure of a store path.
 getClosure :: StorePath -> NixClient [StorePath]
@@ -405,7 +311,7 @@ sendClosure spath = do
           ncDebug $ "Started process to send " <> abbrevSP spath
           refs <- getReferences spath
           -- Concurrently send parent paths.
-          refActions <- forM refs $ \ref -> do
+          refActions <- forM (HS.toList refs) $ \ref -> do
             rAction <- sendClosure ref
             pure (ref, rAction)
           forM_ refActions $ \(ref, rAction) -> do
