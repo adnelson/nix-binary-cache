@@ -50,14 +50,43 @@ instance Binary NarString where
 putNS :: NarString -> Put
 putNS = put
 
+-- | Read a particular nar string, fail if it doesn't match
 getExactNS :: NarString -> Get ()
 getExactNS expected = do
   s <- get
   when (s /= expected) $ do
     fail ("expected string " <> show expected <> " but got " <> show s)
 
+-- | Read an arbitrary nar string, and then convert it into a bytestring.
 getSomeNS :: Get ByteString
 getSomeNS = get >>= \(NarString s) -> pure s
+
+-- | Read a particular bytestring (not nar string -- exact bytes)
+getThisByteString :: ByteString -> Get ()
+getThisByteString expected = do
+  s <- getByteString (length expected)
+  when (s /= expected) $ do
+    fail ("expected string " <> show expected <> " but got " <> show s)
+
+-- | Write a store directory and path into a Put monad.
+putStorePath :: NixStoreDir -> StorePath -> Put
+putStorePath sd sp = putNS $ NarString $ B8.pack $ spToFull sd sp
+
+-- | Magic constant at the beginning of an export.
+magicExportStartConstant :: ByteString
+magicExportStartConstant = B.pack (1 : replicate 7 0)
+
+-- | Magic constant to indicate start of export metadata.
+magicExportMetadataConstant :: ByteString
+magicExportMetadataConstant = "NIXE" <> B.pack (replicate 4 0)
+
+-- | Parse a nar string into a store directory and store path.
+getStorePath :: Get (NixStoreDir, StorePath)
+getStorePath = do
+  NarString s <- get
+  case parseFullStorePath (decodeUtf8 s) of
+    Left err -> fail err
+    Right (sd, sp) -> pure (sd, sp)
 
 instance Binary NarElement where
   put element = inParens internal where
@@ -107,31 +136,6 @@ instance Binary NarElement where
 instance Binary Nar where
   get = label "Nar" $ Nar <$> (getExactNS "nix-archive-1" *> get)
   put (Nar elem) = putNS "nix-archive-1" >> put elem
-
-getThisByteString :: ByteString -> Get ()
-getThisByteString expected = do
-  s <- getByteString (length expected)
-  when (s /= expected) $ do
-    fail ("expected string " <> show expected <> " but got " <> show s)
-
-putStorePath :: NixStoreDir -> StorePath -> Put
-putStorePath sd sp = putNS $ NarString $ B8.pack $ spToFull sd sp
-
-
--- | Magic constant at the beginning of an export
-magicExportStartConstant :: ByteString
-magicExportStartConstant = B.pack (1 : replicate 7 0)
-
--- | Magic constant to indicate start of export metadata
-magicExportMetadataConstant :: ByteString
-magicExportMetadataConstant = "NIXE" <> B.pack (replicate 4 0)
-
-getStorePath :: Get (NixStoreDir, StorePath)
-getStorePath = do
-  NarString s <- get
-  case parseFullStorePath (decodeUtf8 s) of
-    Left err -> fail err
-    Right (sd, sp) -> pure (sd, sp)
 
 instance Binary NarExport where
   put (NarExport {..}) = do
