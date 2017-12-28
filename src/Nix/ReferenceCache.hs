@@ -1,28 +1,46 @@
 -- | Cache store paths and their references
-module Main where
+module Nix.ReferenceCache (
+  NixPathReferenceCache(..),
+  newPathReferenceCache,
+  initializePathCache,
+  getPathReferences
+  ) where
 
-import Database.SQLite.Simple (FromRow(..), ToRow(..), Connection, Query)
-import Database.SQLite.Simple (Only(..), field, lastInsertRowId)
+import Database.SQLite.Simple (Connection, Query, Only(..), lastInsertRowId)
 import Database.SQLite.Simple (open, execute_, execute, query, query_)
 import qualified Data.HashMap.Strict as H
 import qualified Data.HashSet as HS
 import qualified Data.Text as T
 import System.Process.Text (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
+import System.FilePath (takeDirectory)
+import System.Environment (lookupEnv)
 
 import Nix.Cache.Common
-import Nix.Cache.Client hiding (writeCache, writeCacheFor)
-import Nix.Bin
-import Nix.StorePath -- (StorePath(..))
-import Nix.NarInfo ()
+import Nix.Bin (NixBinDir(..), getNixBinDir)
+import Nix.StorePath (NixStoreDir(..), PathTree, PathSet, StorePath, spToText)
+import Nix.StorePath (getNixStoreDir, spToFull, parseStorePath, spToPath)
+import Nix.StorePath (ioParseFullStorePath)
 
-data TestField = TestField Int Text deriving (Show)
+-- | Figure out where to access the local nix state DB.
+getNixDBDir :: IO FilePath
+getNixDBDir = lookupEnv "NIX_DB_DIR" >>= \case
+  Just dir -> pure dir
+  Nothing -> lookupEnv "NIX_STATE_DIR" >>= \case
+    Just stateDir -> pure (stateDir </> "nix" </> "db" </> "db.sqlite")
+    Nothing -> do
+      NixBinDir d <- getNixBinDir
+      pure $ takeDirectory (takeDirectory (takeDirectory d))
+         </> "var" </> "nix" </> "db" </> "db.sqlite"
 
-instance FromRow TestField where
-  fromRow = TestField <$> field <*> field
+-- | Figure out the location in which to put the cache.
+getPathCacheLocation :: IO FilePath
+getPathCacheLocation = lookupEnv "CLIENT_SQLITE_CACHE" >>= \case
+  Just location -> pure location
+  Nothing -> lookupEnv "HOME" >>= \case
+    Nothing -> error "HOME variable isn't set"
+    Just home -> pure (home </> ".nix-client-cache")
 
-instance ToRow TestField where
-  toRow (TestField id_ str) = toRow (id_, str)
 
 -- | Path reference cache, backed by sqlite
 data NixPathReferenceCache = NixPathReferenceCache {
@@ -52,9 +70,10 @@ attemptLocalNixConnection dbpath = do
     putStrLn $ "Can't use local nix SQLite database: " <> tshow err
     pure Nothing
 
-newPathReferenceCache :: FilePath -> IO NixPathReferenceCache
-newPathReferenceCache nprcCacheLocation = do
-  nprcLocalNixDbConnection <- attemptLocalNixConnection "/nix/var/nix/db/db.sqlite"
+newPathReferenceCache :: IO NixPathReferenceCache
+newPathReferenceCache = do
+  nprcCacheLocation <- getPathCacheLocation
+  nprcLocalNixDbConnection <- attemptLocalNixConnection =<< getNixDBDir
   nprcStoreDir <- getNixStoreDir
   nprcBinDir <- getNixBinDir
   nprcConnection <- newMVar =<< open nprcCacheLocation
@@ -62,10 +81,10 @@ newPathReferenceCache nprcCacheLocation = do
   nprcPathTree <- newMVar mempty
   pure NixPathReferenceCache {..}
 
--- | Get the references of an object by asking the nix-store. This
--- information is cached by the caller of this function.
-getRefsFromNixDB :: NixPathReferenceCache -> StorePath -> IO PathSet
-getRefsFromNixDB cache spath = case nprcLocalNixDbConnection cache of
+-- | Get the references of an object by asking either a nix command or the DB.
+-- This information is cached by the caller of this function.
+getRefs :: NixPathReferenceCache -> StorePath -> IO PathSet
+getRefs cache spath = case nprcLocalNixDbConnection cache of
   -- We can't access the DB directly. Use the CLI.
   Nothing -> getRefsFromNixCommand cache spath
   -- Pull the references directly out of the database.
@@ -80,6 +99,7 @@ getRefsFromNixDB cache spath = case nprcLocalNixDbConnection cache of
     refs <- query conn getPathsQuery (Only nixPathId)
     map HS.fromList $ map snd <$> mapM ioParseFullStorePath (map fromOnly refs)
 
+-- | Get references of a path by querying the nix CLI.
 getRefsFromNixCommand :: NixPathReferenceCache -> StorePath -> IO PathSet
 getRefsFromNixCommand cache spath = do
   let nixStoreCmd = unpackNixBinDir (nprcBinDir cache) </> "nix-store"
@@ -94,18 +114,6 @@ getRefsFromNixCommand cache spath = do
             msg = msg' <> unpack (if T.strip stderr == "" then ""
                                   else "\nSTDERR:\n" <> stderr)
 
--- writeCacheFor :: Connection -> StorePath -> [StorePath] -> NixClient ()
--- writeCacheFor conn path refs = do
-
-
--- writeCache :: NixClient ()
---   cacheLocation <- nccCacheLocation <$> ncoConfig <$> ask
---   conn <- liftIO $ open "test.db"
---   mv <- ncoState <$> ask
---   tree <- ncsPathTree <$> readMVar mv
---   forM_ (H.toList tree) $ \(path, refs) -> do
---     writeCacheFor path refs
-
 -- | Query which will return all of the references of a path.
 getPathsQuery :: Query
 getPathsQuery = fromString $ concat [
@@ -114,25 +122,15 @@ getPathsQuery = fromString $ concat [
   ") on id = reference"
   ]
 
+-- | Get the references of a path, checking and updating the cache.
 getPathReferences :: NixPathReferenceCache -> StorePath -> IO PathSet
 getPathReferences cache path = getPathReferencesFromCache cache path >>= \case
-  Just refs -> do
-    putStrLn $ tshow path <> " is in the cache"
-    pure refs
+  Just refs -> pure refs
   Nothing -> do
-    putStrLn $ tshow path <> " not in cache, querying nix"
-    refs <- getRefsFromNixDB cache path
+    refs <- getRefs cache path
     addPath cache path
     storePathReferences cache path refs
     pure refs
-
-getpaths :: Int -> IO [StorePath]
-getpaths n = do
-  NixStoreDir d <- getNixStoreDir
-  items <- take n <$> listDirectory d
-  forM items $ \item -> do
-    let Right sp = parseStorePath $ pack item
-    pure sp
 
 -- | Get a store path's references from the cache. Return Nothing if
 -- the path isn't recorded in the cache yet. Caches in memory.
@@ -143,9 +141,7 @@ getPathReferencesFromCache cache path = do
     case H.lookup path tree of
       Just refs -> pure (tree, Just refs)
       Nothing -> getPathId cache path >>= \case
-        Nothing -> do
-          putStrLn $ tshow path <> " not recorded"
-          pure (tree, Nothing)
+        Nothing -> pure (tree, Nothing)
         Just pathId -> do
           conn <- readMVar (nprcConnection cache)
           let qry = "select refs from Paths where id = ?"
@@ -159,29 +155,25 @@ getPathReferencesFromCache cache path = do
                   Left err -> error $ "When parsing references of path "
                                    <> spToPath path <> ": " <> err
               pure (H.insert path refs tree, Just refs)
-            _ -> do
-              putStrLn $ tshow path <> " references not recorded"
-              pure (tree, Nothing)
+            _ -> pure (tree, Nothing)
 
 -- | Get a store path's ID. Caches in memory.
-getPathId
-  :: NixPathReferenceCache -> StorePath -> IO (Maybe Int64)
+getPathId :: NixPathReferenceCache -> StorePath -> IO (Maybe Int64)
 getPathId cache path = do
   modifyMVar (nprcPathIdCache cache) $ \pathIdCache -> do
     case H.lookup path pathIdCache of
       Just pathId -> pure (pathIdCache, Just pathId)
       Nothing -> do
         let row = (Only $ spToText path)
-        withMVar (nprcConnection cache) $ \conn -> do
-          query conn "select id from Paths where path = ?" row >>= \case
-            [Only pathId'] -> do
-              pure (H.insert path pathId' pathIdCache, Just pathId')
-            _ -> do
-              pure (pathIdCache, Nothing)
+        conn <- readMVar (nprcConnection cache)
+        query conn "select id from Paths where path = ?" row >>= \case
+          [Only pathId'] -> do
+            pure (H.insert path pathId' pathIdCache, Just pathId')
+          _ -> do
+            pure (pathIdCache, Nothing)
 
 -- | Store the references of a path. Caches in memory and in the DB.
-storePathReferences
-  :: NixPathReferenceCache -> StorePath -> PathSet -> IO ()
+storePathReferences :: NixPathReferenceCache -> StorePath -> PathSet -> IO ()
 storePathReferences cache path refs = getPathId cache path >>= \case
   Nothing -> error "Can't add references, path hasn't been stored"
   Just pathId -> do
@@ -229,32 +221,3 @@ initializePathCache nprc = do
     execute_ conn $ fromString $
       "create table if not exists Paths " <>
       "(id integer primary key, path text unique not null, refs text)"
-    execute_ conn
-      "create table if not exists Refs (referrer integer, reference integer)"
-
-getCache :: IO NixPathReferenceCache
-getCache = do
-  newPathReferenceCache =<< map nccCacheLocation loadClientConfig
-
-getConn :: IO Connection
-getConn = do
-  cache <- getCache
-  readMVar $ nprcConnection cache
-
-main :: IO ()
-main = do
-  cfg <- loadClientConfig
-  cache <- newPathReferenceCache (nccCacheLocation cfg)
-  initializePathCache cache
-  {-
-  conn <- open "test.db"
-  execute_ conn "CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY, str TEXT)"
-  execute conn "INSERT INTO test (str) VALUES (?)" (Only ("test string 2" :: String))
-  execute conn "INSERT INTO test (id, str) VALUES (?,?)" (TestField 13 "test string 3")
-  rowId <- lastInsertRowId conn
-  executeNamed conn "UPDATE test SET str = :str WHERE id = :id" [":str" := ("updated str" :: Text), ":id" := rowId]
-  r <- query_ conn "SELECT * from test" :: IO [TestField]
-  mapM_ print r
-  execute conn "DELETE FROM test WHERE id = ?" (Only rowId)
-  close conn
-  -}
