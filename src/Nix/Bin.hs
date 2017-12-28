@@ -16,7 +16,8 @@ import Nix.StorePath (StorePath, FullStorePath, NixStoreDir,
                       ioParseFullStorePath)
 
 -- | Path to the directory containing nix binaries.
-newtype NixBinDir = NixBinDir FilePath deriving (Show, Eq, IsString)
+newtype NixBinDir = NixBinDir {unpackNixBinDir::FilePath}
+  deriving (Show, Eq, IsString)
 
 -- | Get the nix binary directory path, e.g. where `nix-store` lives.
 getNixBinDir :: IO NixBinDir

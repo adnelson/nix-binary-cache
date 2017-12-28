@@ -2,6 +2,7 @@
 module Nix.FileHash where
 
 import ClassyPrelude
+import Database.SQLite.Simple.FromField (FromField(fromField))
 import qualified Data.Text as T
 
 -- | A representation of a hash, which expresses the type of
@@ -15,6 +16,12 @@ data FileHash
   | Md5Hash Text -- ^ Hash computed with sha256.
   | RecursiveHash FileHash -- ^ Hash should be computed over a directory.
   deriving (Show, Eq, Generic)
+
+instance FromField FileHash where
+  fromField f = do
+    fileHashFromText <$> fromField f >>= \case
+      Right hash -> pure hash
+      Left err -> fail err
 
 -- | Translate a file hash to text.
 fileHashToText :: FileHash -> Text

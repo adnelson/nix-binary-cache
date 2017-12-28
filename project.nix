@@ -35,6 +35,7 @@ let
     "servant-lucid"
     "servant-server"
     "servant"
+    "sqlite-simple"
     "text"
     "transformers"
     "unordered-containers"
@@ -166,8 +167,8 @@ let
       ghc-options:         -O3 ${joinSpaces ghc-build-options}
 
     ${if false then "" else ''
-    executable nar-parse
-      main-is:             Nix/PrintNar.hs
+    executable ref-cache
+      main-is:             Nix/ReferenceCache.hs
       build-depends:       ${joinCommas dependencies}
       hs-source-dirs:      src
       default-language:    Haskell2010

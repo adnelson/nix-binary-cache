@@ -10,6 +10,7 @@ import System.FilePath (takeFileName, takeDirectory, isAbsolute)
 import System.Environment (getEnv)
 import Servant (MimeUnrender(..), OctetStream)
 import Servant.HTML.Lucid (HTML)
+import Data.HashSet (HashSet)
 
 -- | The nix store directory.
 newtype NixStoreDir = NixStoreDir FilePath
@@ -27,7 +28,7 @@ instance Hashable StorePath
 
 -- | A dependency tree, represented as a mapping from a store path to
 -- its set of (immediate, not transitive) dependent paths.
-type PathTree = HashMap StorePath [StorePath]
+type PathTree = HashMap StorePath PathSet
 
 -- | A set of store paths.
 type PathSet = HashSet StorePath
@@ -77,9 +78,13 @@ spToFull (NixStoreDir storeDir) p = storeDir </> spToPath p
 spToFull' :: FullStorePath -> FilePath
 spToFull' = uncurry spToFull
 
+-- | Convert a StorePath to Text.
+spToText :: StorePath -> Text
+spToText (StorePath (StorePrefix hash) name) = hash <> "-" <> name
+
 -- | Convert a StorePath to a FilePath.
 spToPath :: StorePath -> FilePath
-spToPath (StorePath (StorePrefix hash) name) = unpack $ hash <> "-" <> name
+spToPath = unpack . spToText
 
 -- | Find a nix store path by its store prefix. If multiple paths
 -- satisfy the prefix, the first one will be taken.
