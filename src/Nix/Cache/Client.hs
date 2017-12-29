@@ -113,7 +113,7 @@ data NixClientObj = NixClientObj {
   -- ^ Mutable state of the client.
   ncoManager :: Manager,
   -- ^ HTTP connection manager client uses to connect.
-  ncoPathReferenceCache :: NixPathReferenceCache,
+  ncoReferenceCache :: NixReferenceCache,
   -- ^ Database connection for the local cache. Syncronized in MVar to
   -- allow lastrowid to be deterministic
   ncoLogMutex :: MVar (),
@@ -147,7 +147,7 @@ runNixClient action = do
   let state = NixClientState mempty
   stateMVar <- newMVar state
   logMVar <- newMVar ()
-  cache <- newPathReferenceCache
+  cache <- newReferenceCache
   let obj = NixClientObj cfg stateMVar manager cache logMVar semaphore
   -- Perform the action and then update the cache.
   result <- runReaderT (action) obj
@@ -229,12 +229,6 @@ clientRequest req = do
 -- * Nix client actions
 -------------------------------------------------------------------------------
 
--- | Get references of a path, reading from and writing to a cache.
-getReferences :: StorePath -> NixClient PathSet
-getReferences spath = do
-  cache <- ncoPathReferenceCache <$> ask
-  liftIO $ getPathReferences cache spath
-
 -- | Get the full runtime path dependency closure of a store path.
 getClosure :: StorePath -> NixClient [StorePath]
 getClosure path = do
@@ -309,7 +303,8 @@ sendClosure spath = do
       Nothing -> do
         action <- async $ do
           ncDebug $ "Started process to send " <> abbrevSP spath
-          refs <- getReferences spath
+          cache <- ncoReferenceCache <$> ask
+          refs <- liftIO $ getReferences cache spath
           -- Concurrently send parent paths.
           refActions <- forM (HS.toList refs) $ \ref -> do
             rAction <- sendClosure ref

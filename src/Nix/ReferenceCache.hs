@@ -1,9 +1,10 @@
 -- | Cache store paths and their references
 module Nix.ReferenceCache (
-  NixPathReferenceCache(..),
-  newPathReferenceCache,
-  initializePathCache,
-  getPathReferences
+  NixReferenceCache(..),
+  newReferenceCache,
+  initializeReferenceCache,
+  getReferences,
+  recordReferences
   ) where
 
 import Database.SQLite.Simple (Connection, Query, Only(..), lastInsertRowId)
@@ -17,6 +18,7 @@ import System.FilePath (takeDirectory)
 import System.Environment (lookupEnv)
 
 import Nix.Cache.Common
+import Nix.Cache.Client.Misc
 import Nix.Bin (NixBinDir(..), getNixBinDir)
 import Nix.StorePath (NixStoreDir(..), PathTree, PathSet, StorePath, spToText)
 import Nix.StorePath (getNixStoreDir, spToFull, parseStorePath, spToPath)
@@ -41,22 +43,23 @@ getPathCacheLocation = lookupEnv "CLIENT_SQLITE_CACHE" >>= \case
     Nothing -> error "HOME variable isn't set"
     Just home -> pure (home </> ".nix-client-cache")
 
-
 -- | Path reference cache, backed by sqlite
-data NixPathReferenceCache = NixPathReferenceCache {
+data NixReferenceCache = NixReferenceCache {
   nprcStoreDir :: NixStoreDir,
+  -- ^ Location of the nix store.
   nprcLocalNixDbConnection :: Maybe Connection,
-  -- ^ What's the path to the nix DB?
+  -- ^ Connection to the local nix database (optional).
   nprcBinDir :: NixBinDir,
+  -- ^ Location on disk for nix binaries.
   nprcCacheLocation :: FilePath,
-  -- ^ Where does the cache live on disk?
+  -- ^ Location of the cache SQLite database.
   nprcConnection :: MVar Connection,
   -- ^ Database connection for the local cache. Syncronized in MVar to
   -- allow lastrowid to be deterministic.
   nprcPathIdCache :: MVar (HashMap StorePath Int64),
   -- ^ Map store paths to their database row ID, so that we don't have to
   -- look them up all the time.
-  nprcPathTree :: MVar PathTree
+  nprcPathReferences :: MVar PathTree
   -- ^ Computed store path dependency tree.
   }
 
@@ -70,20 +73,20 @@ attemptLocalNixConnection dbpath = do
     putStrLn $ "Can't use local nix SQLite database: " <> tshow err
     pure Nothing
 
-newPathReferenceCache :: IO NixPathReferenceCache
-newPathReferenceCache = do
+newReferenceCache :: IO NixReferenceCache
+newReferenceCache = do
   nprcCacheLocation <- getPathCacheLocation
   nprcLocalNixDbConnection <- attemptLocalNixConnection =<< getNixDBDir
   nprcStoreDir <- getNixStoreDir
   nprcBinDir <- getNixBinDir
   nprcConnection <- newMVar =<< open nprcCacheLocation
   nprcPathIdCache <- newMVar mempty
-  nprcPathTree <- newMVar mempty
-  pure NixPathReferenceCache {..}
+  nprcPathReferences <- newMVar mempty
+  pure NixReferenceCache {..}
 
 -- | Get the references of an object by asking either a nix command or the DB.
 -- This information is cached by the caller of this function.
-getRefs :: NixPathReferenceCache -> StorePath -> IO PathSet
+getRefs :: NixReferenceCache -> StorePath -> IO PathSet
 getRefs cache spath = case nprcLocalNixDbConnection cache of
   -- We can't access the DB directly. Use the CLI.
   Nothing -> getRefsFromNixCommand cache spath
@@ -100,7 +103,7 @@ getRefs cache spath = case nprcLocalNixDbConnection cache of
     map HS.fromList $ map snd <$> mapM ioParseFullStorePath (map fromOnly refs)
 
 -- | Get references of a path by querying the nix CLI.
-getRefsFromNixCommand :: NixPathReferenceCache -> StorePath -> IO PathSet
+getRefsFromNixCommand :: NixReferenceCache -> StorePath -> IO PathSet
 getRefsFromNixCommand cache spath = do
   let nixStoreCmd = unpackNixBinDir (nprcBinDir cache) </> "nix-store"
       storeDir = nprcStoreDir cache
@@ -123,21 +126,21 @@ getPathsQuery = fromString $ concat [
   ]
 
 -- | Get the references of a path, checking and updating the cache.
-getPathReferences :: NixPathReferenceCache -> StorePath -> IO PathSet
-getPathReferences cache path = getPathReferencesFromCache cache path >>= \case
+getReferences :: NixReferenceCache -> StorePath -> IO PathSet
+getReferences cache path = getReferencesFromCache cache path >>= \case
   Just refs -> pure refs
   Nothing -> do
     refs <- getRefs cache path
     addPath cache path
-    storePathReferences cache path refs
+    recordReferences cache path refs
     pure refs
 
 -- | Get a store path's references from the cache. Return Nothing if
 -- the path isn't recorded in the cache yet. Caches in memory.
-getPathReferencesFromCache
-  :: NixPathReferenceCache -> StorePath -> IO (Maybe PathSet)
-getPathReferencesFromCache cache path = do
-  modifyMVar (nprcPathTree cache) $ \tree -> do
+getReferencesFromCache
+  :: NixReferenceCache -> StorePath -> IO (Maybe PathSet)
+getReferencesFromCache cache path = do
+  modifyMVar (nprcPathReferences cache) $ \tree -> do
     case H.lookup path tree of
       Just refs -> pure (tree, Just refs)
       Nothing -> getPathId cache path >>= \case
@@ -158,7 +161,7 @@ getPathReferencesFromCache cache path = do
             _ -> pure (tree, Nothing)
 
 -- | Get a store path's ID. Caches in memory.
-getPathId :: NixPathReferenceCache -> StorePath -> IO (Maybe Int64)
+getPathId :: NixReferenceCache -> StorePath -> IO (Maybe Int64)
 getPathId cache path = do
   modifyMVar (nprcPathIdCache cache) $ \pathIdCache -> do
     case H.lookup path pathIdCache of
@@ -173,11 +176,11 @@ getPathId cache path = do
             pure (pathIdCache, Nothing)
 
 -- | Store the references of a path. Caches in memory and in the DB.
-storePathReferences :: NixPathReferenceCache -> StorePath -> PathSet -> IO ()
-storePathReferences cache path refs = getPathId cache path >>= \case
+recordReferences :: NixReferenceCache -> StorePath -> PathSet -> IO ()
+recordReferences cache path refs = getPathId cache path >>= \case
   Nothing -> error "Can't add references, path hasn't been stored"
   Just pathId -> do
-    modifyMVar_ (nprcPathTree cache) $ \tree -> do
+    modifyMVar_ (nprcPathReferences cache) $ \tree -> do
       case H.lookup path tree of
         Just refs' | refs == refs' -> pure tree
         Just _ -> error $ "Inconsistent reference lists for path " <> show path
@@ -197,7 +200,7 @@ storePathReferences cache path refs = getPathId cache path >>= \case
 -- 2. In the database: add the ID to the in-memory cache, return it.
 -- 3. Not in the database: add it to the database, add new ID to the
 --    in-memory cache, and return it.
-addPath :: NixPathReferenceCache -> StorePath -> IO Int64
+addPath :: NixReferenceCache -> StorePath -> IO Int64
 addPath cache path = do
   modifyMVar (nprcPathIdCache cache) $ \pathIdCache -> do
     case H.lookup path pathIdCache of
@@ -215,8 +218,8 @@ addPath cache path = do
 
 
 -- | Create the tables in the path cache
-initializePathCache :: NixPathReferenceCache -> IO ()
-initializePathCache nprc = do
+initializeReferenceCache :: NixReferenceCache -> IO ()
+initializeReferenceCache nprc = do
   withMVar (nprcConnection nprc) $ \conn -> do
     execute_ conn $ fromString $
       "create table if not exists Paths " <>
