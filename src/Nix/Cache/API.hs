@@ -20,5 +20,5 @@ type NixCacheAPI = "nix-cache-info" :> Get OStream NixCacheInfo
               :<|> "nar" :> Capture "nar" NarRequest :> Get OStream Nar
               :<|> "query-paths" :> ReqBody '[JSON] (Vector FilePath)
                                  :> Get '[JSON] (HashMap FilePath Bool)
-              :<|> "import-path" :> ReqBody '[GZipped] Nar
+              :<|> "import-path" :> ReqBody '[GZipped] NarExport
                                  :> Post '[HTML, OctetStream] StorePath

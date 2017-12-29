@@ -4,6 +4,7 @@ module Nix.ReferenceCache (
   newReferenceCache,
   initializeReferenceCache,
   getReferences,
+  getReferencesIncludeSelf,
   recordReferences
   ) where
 
@@ -126,14 +127,21 @@ getPathsQuery = fromString $ concat [
   ]
 
 -- | Get the references of a path, checking and updating the cache.
+-- Doesn't filter out self-references.
+getReferencesIncludeSelf :: NixReferenceCache -> StorePath -> IO PathSet
+getReferencesIncludeSelf cache path = do
+  getReferencesFromCache cache path >>= \case
+    Just refs -> pure refs
+    Nothing -> do
+      refs <- getRefs cache path
+      addPath cache path
+      recordReferences cache path refs
+      pure refs
+
 getReferences :: NixReferenceCache -> StorePath -> IO PathSet
-getReferences cache path = getReferencesFromCache cache path >>= \case
-  Just refs -> pure refs
-  Nothing -> do
-    refs <- getRefs cache path
-    addPath cache path
-    recordReferences cache path refs
-    pure refs
+getReferences cache path = do
+  allrefs <- getReferencesIncludeSelf cache path
+  pure $ HS.delete path allrefs
 
 -- | Get a store path's references from the cache. Return Nothing if
 -- the path isn't recorded in the cache yet. Caches in memory.

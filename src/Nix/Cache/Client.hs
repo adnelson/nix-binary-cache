@@ -40,12 +40,12 @@ nixCacheInfo :: ClientM NixCacheInfo
 narInfo :: NarInfoReq -> ClientM NarInfo
 nar :: NarRequest -> ClientM Nar
 queryPaths :: Vector FilePath -> ClientM (HashMap FilePath Bool)
-sendNar :: Nar -> ClientM StorePath
+sendNarExport :: NarExport -> ClientM StorePath
 nixCacheInfo
   :<|> narInfo
   :<|> nar
   :<|> queryPaths
-  :<|> sendNar = client (Proxy :: Proxy NixCacheAPI)
+  :<|> sendNarExport = client (Proxy :: Proxy NixCacheAPI)
 
 -- | Base URL of the nixos cache.
 nixosCacheUrl :: BaseUrl
@@ -138,10 +138,9 @@ loadClientConfig = do
   nccBinDir <- getNixBinDir
   pure NixClientConfig {..}
 
--- | Run the nix client monad.
-runNixClient :: NixClient a -> IO a
-runNixClient action = do
-  cfg <- loadClientConfig
+-- | Run the nix client monad, given a configuration.
+runNixClientWithConfig :: NixClientConfig -> NixClient a -> IO a
+runNixClientWithConfig cfg action = do
   semaphore <- newQSem (nccMaxWorkers cfg)
   manager <- mkManager cfg
   let state = NixClientState mempty
@@ -152,6 +151,12 @@ runNixClient action = do
   -- Perform the action and then update the cache.
   result <- runReaderT (action) obj
   pure result
+
+-- | Run the nix client monad.
+runNixClient :: NixClient a -> IO a
+runNixClient action = do
+  cfg <- loadClientConfig
+  runNixClientWithConfig cfg action
 
 -------------------------------------------------------------------------------
 -- * Nix client logging
@@ -304,6 +309,7 @@ sendClosure spath = do
         action <- async $ do
           ncDebug $ "Started process to send " <> abbrevSP spath
           cache <- ncoReferenceCache <$> ask
+          ncDebug $ "Getting references for " <> abbrevSP spath
           refs <- liftIO $ getReferences cache spath
           -- Concurrently send parent paths.
           refActions <- forM (HS.toList refs) $ \ref -> do
@@ -315,22 +321,27 @@ sendClosure spath = do
                               tshow $ asyncThreadId rAction, ")"]
             wait rAction
             ncDebug $ abbrevSP ref <> " finished"
+          ncDebug $ "Parent paths have finished sending, now sending "
+                 <> abbrevSP spath <> " itself..."
           -- Once parents are sent, send the path itself.
           sendPath spath
         let s' = s {ncsSentPaths = H.insert spath action $ ncsSentPaths s}
         return (s', action)
 
--- | Send a single path to a nix repo.
+-- | Send a single path to a nix repo. This doesn't automatically
+-- include parent paths, so it generally shouldn't be used externally to
+-- this module (use sendClosure instead)
 sendPath :: StorePath -> NixClient ()
 sendPath p = do
   -- Acquire a resource from our semaphore.
+  ncDebug "Waiting for semaphore"
   waitQSem =<< asks ncoSemaphore
   ncDebug $ "Getting nar data for " <> abbrevSP p <> "..."
   storeDir <- nccStoreDir . ncoConfig <$> ask
   binDir <- nccBinDir . ncoConfig <$> ask
-  nar <- liftIO $ getNar binDir storeDir p
+  export <- liftIO $ getNarExport binDir storeDir p
   ncInfo $ "Sending " <> abbrevSP p
-  clientRequest $ sendNar nar
+  clientRequest $ sendNarExport export
   ncDebug $ "Finished sending " <> abbrevSP p
   -- Release the resource to the semaphore.
   signalQSem =<< asks ncoSemaphore
