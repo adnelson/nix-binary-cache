@@ -4,14 +4,16 @@ import Control.Concurrent.Async.Lifted (wait)
 import Control.Monad.State.Strict (execStateT, modify)
 import GHC.Conc (getNumProcessors)
 import Network.HTTP.Client (Manager, Request(..), ManagerSettings(..))
-import Network.HTTP.Client (newManager, defaultManagerSettings)
+import Network.HTTP.Client (newManager, defaultManagerSettings, responseHeaders)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
+import Network.HTTP.Types.Status (Status(..))
 import Servant ((:<|>)(..), Proxy(Proxy))
 import Servant.Client (BaseUrl(..), ClientM, ClientEnv(ClientEnv), Scheme(..))
-import Servant.Client (runClientM, client, )
+import Servant.Client (runClientM, client, ServantError(FailureResponse))
 import Servant.Common.BaseUrl (parseBaseUrl)
-import System.Exit (ExitCode(ExitSuccess, ExitFailure))
 import System.Environment (lookupEnv)
+import System.Exit (ExitCode(ExitSuccess, ExitFailure))
+import System.IO (IO, stdout, stderr, hSetBuffering, BufferMode(LineBuffering))
 import System.Process.Text (readProcessWithExitCode)
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.HashMap.Strict as H
@@ -19,12 +21,14 @@ import qualified Data.HashSet as HS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Vector as V
+import qualified Prelude as P
 
 import Nix.Cache.Common
 import Nix.Cache.API
-import Nix.StorePath (NixStoreDir, StorePath, PathSet)
-import Nix.StorePath (ioParseFullStorePath, spToFull)
-import Nix.StorePath (getNixStoreDir, abbrevSP)
+import Nix.Cache.Client.Misc (getNixStorePaths)
+import Nix.StorePath (NixStoreDir, StorePath(spPrefix), PathSet)
+import Nix.StorePath (ioParseFullStorePath, spToFull, abbrevSP)
+import Nix.StorePath (getNixStoreDir)
 import Nix.ReferenceCache
 import Nix.Cache.Types
 import Nix.Nar
@@ -81,6 +85,14 @@ nixCacheUrlFromEnv = do
 -------------------------------------------------------------------------------
 -- * Nix client monad
 -------------------------------------------------------------------------------
+
+data NixClientError
+  = PathFailedToSend StorePath ServantError
+  | PathFailedToFetch StorePath ServantError
+  | PathFailedToGetNarInfo StorePath ServantError
+  deriving (Show, Eq, Generic)
+
+instance Exception NixClientError
 
 -- | Configuration of the nix client.
 data NixClientConfig = NixClientConfig {
@@ -218,17 +230,35 @@ mkManager config = do
             requestHeaders = requestHeaders req `snoc`
               ("Authorization", "Basic " <> authB64)
           }
-  newManager managerSettings {managerModifyRequest = modifyReq}
+      modifyResponse resp = do
+        let headers = H.fromList $ responseHeaders resp
+            fixContentType = \case
+              "binary/octet-stream" -> "application/octet-stream"
+              "text/x-nix-narinfo" -> "application/octet-stream"
+              ctype -> ctype
+            headers' = case lookup "content-type" headers of
+              Just t -> H.insert "content-type" (fixContentType t) headers
+              Nothing -> headers
+        pure resp {responseHeaders = H.toList headers'}
+  newManager managerSettings {
+    managerModifyRequest = modifyReq,
+    managerModifyResponse = modifyResponse
+    }
 
 -- | Perform a request with the servant client in the NixClient monad.
+-- Throws error responses as exceptions.
 clientRequest :: ClientM a -> NixClient a
-clientRequest req = do
+clientRequest req = clientRequestEither req >>= \case
+  Left err -> throw err
+  Right result -> pure result
+
+-- | Perform a request with the servant client in the NixClient monad.
+clientRequestEither :: ClientM a -> NixClient (Either ServantError a)
+clientRequestEither req = do
   config <- ncoConfig <$> ask
   manager <- ncoManager <$> ask
   let env = ClientEnv manager (nccCacheUrl config)
-  liftIO $ runClientM req env >>= \case
-    Left err -> error $ show err
-    Right result -> pure result
+  liftIO $ runClientM req env
 
 -------------------------------------------------------------------------------
 -- * Nix client actions
@@ -251,6 +281,41 @@ getClosure path = do
             msg = msg' <> unpack (if T.strip stderr == "" then ""
                                   else "\nSTDERR:\n" <> stderr)
 
+-- | Do a nix client action inside of the semaphore
+inSemaphore :: NixClient a -> NixClient a
+inSemaphore action = bracket getSem releaseSem (\_ -> action) where
+  -- Acquire a resource from our semaphore.
+  getSem = do
+    ncDebug "Waiting for semaphore"
+    waitQSem =<< asks ncoSemaphore
+  -- Release the resource to the semaphore.
+  releaseSem () = do
+    ncDebug "Releasing semaphore"
+    signalQSem =<< asks ncoSemaphore
+
+
+-- | Get the NAR info for a store path by requesting to the server.
+getNarInfo :: StorePath -> NixClient (Maybe NarInfo)
+getNarInfo path = inSemaphore $ do
+  ncDebug $ "Requesting narinfo for " <> tshow path
+  let req = NarInfoReq (spPrefix path)
+  clientRequestEither (narInfo req) >>= \case
+    Right info -> pure $ Just info
+    Left err -> case err of
+      FailureResponse _ (Status 404 _) _ _ -> pure Nothing
+      _ -> throw $ PathFailedToGetNarInfo path err
+
+-- | If the server in question doesn't support the /query-paths route,
+-- instead the NarInfo of each path can be requested from the server as a
+-- way to determine if it's on the server.
+getPathsOnServerWithNarInfo :: [StorePath] -> NixClient (HashMap StorePath Bool)
+getPathsOnServerWithNarInfo paths = do
+  asyncs <- forM paths $ \path -> do
+    async $ getNarInfo path >>= \case
+      Nothing -> pure (path, False)
+      Just _ -> pure (path, True)
+  H.fromList <$> mapM wait asyncs
+
 -- | Given some store paths to send, find their closure and see which
 -- of those paths do not already exist on the server.
 queryStorePaths :: [StorePath]
@@ -265,19 +330,26 @@ queryStorePaths paths = do
   ncDebug $ "Full closure contains " <> count pathsToSend <> "."
   storeDir <- nccStoreDir . ncoConfig <$> ask
   -- Convert the path list to full paths and convert that to a vector.
-  let pathsV = V.fromList $ map (spToFull storeDir) $ HS.toList pathsToSend
+  let paths = HS.toList pathsToSend
+      pathsV = V.fromList $ map (spToFull storeDir) paths
   -- Now that we have the full list built up, send it to the
   -- server to see which paths are already there.
-  response <- clientRequest $ queryPaths pathsV
+  ncDebug "Querying repo to see what paths it has"
+  pathResults <- clientRequestEither (queryPaths $ pathsV) >>= \case
+    Right r -> map H.fromList $ forM (H.toList r) $ \(pathStr, onServer) -> do
+      spath <- snd <$> ioParseFullStorePath (pack pathStr)
+      pure (spath, onServer)
+    Left err -> case err of
+      FailureResponse _ (Status 404 _) _ _ -> getPathsOnServerWithNarInfo paths
+      _ -> throw err
   -- Split the dictionary into two lists.
   result <- flip execStateT (mempty, mempty) $ do
-    forM_ (H.toList response) $ \(pathStr, isInRepo) -> do
-      spath <- snd <$> ioParseFullStorePath (pack pathStr)
+    forM_ (H.toList pathResults) $ \(spath, isInRepo) -> do
       modify $ \(inrepo, notinrepo) -> case isInRepo of
         True -> (HS.insert spath inrepo, notinrepo)
         False -> (inrepo, HS.insert spath notinrepo)
-  ncDebug $ count (fst result) <> " paths are already on the repo, and "
-         <> count (snd result) <> " paths are not."
+  ncInfo $ count (fst result) <> " paths are already on the repo, and "
+        <> count (snd result) <> " paths are not."
   pure result
 
 -- | Send paths and their dependencies, after first checking for ones
@@ -331,17 +403,30 @@ sendClosure spath = do
 -- | Send a single path to a nix repo. This doesn't automatically
 -- include parent paths, so it generally shouldn't be used externally to
 -- this module (use sendClosure instead)
+--
+-- TODO: retry logic? progress?
 sendPath :: StorePath -> NixClient ()
-sendPath p = do
-  -- Acquire a resource from our semaphore.
-  ncDebug "Waiting for semaphore"
-  waitQSem =<< asks ncoSemaphore
+sendPath p = inSemaphore $ do
   ncDebug $ "Getting nar data for " <> abbrevSP p <> "..."
   storeDir <- nccStoreDir . ncoConfig <$> ask
   binDir <- nccBinDir . ncoConfig <$> ask
   export <- liftIO $ getNarExport binDir storeDir p
   ncInfo $ "Sending " <> abbrevSP p
-  clientRequest $ sendNarExport export
+  clientRequestEither (sendNarExport export) >>= \case
+    Right _ -> pure ()
+    Left err -> throw $ PathFailedToSend p err
   ncDebug $ "Finished sending " <> abbrevSP p
-  -- Release the resource to the semaphore.
-  signalQSem =<< asks ncoSemaphore
+
+mytest :: IO ()
+mytest = do
+  -- Make line-buffered, so we can use putStrLn in multithreaded code.
+  hSetBuffering stdout LineBuffering
+  hSetBuffering stderr LineBuffering
+
+  cfg' <- loadClientConfig
+  let cfg = cfg' { nccCacheUrl = BaseUrl Http "10.0.249.215" 5000 ""
+                 --  nccLogLevel = LOG_DEBUG
+                 }
+  _ <- (P.!! 5) <$> getNixStorePaths 10
+  paths <- getNixStorePaths 20
+  runNixClientWithConfig cfg (sendClosures paths *> ncInfo "finished")

@@ -21,7 +21,7 @@ newtype StorePrefix = StorePrefix Text
   deriving (Show, Eq, Generic, Hashable, IsString)
 
 -- | The hash and name of an object in the nix store.
-data StorePath = StorePath StorePrefix Text
+data StorePath = StorePath {spPrefix :: StorePrefix, spName :: Text}
   deriving (Show, Eq, Generic)
 
 instance Hashable StorePath

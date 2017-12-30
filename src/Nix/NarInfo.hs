@@ -8,6 +8,7 @@ import qualified Data.Text as T
 
 import Servant (MimeUnrender(..), ToHttpApiData(..), OctetStream)
 
+import Nix.StorePath (StorePrefix(StorePrefix))
 import Nix.FileHash (FileHash(..), fileHashFromText)
 
 -- | Nix archive info. This returns metadata about an object that the
@@ -92,3 +93,10 @@ data NarRequest = NarRequest Text NarCompressionType
 -- | Store prefixes are used to request NAR information.
 instance ToHttpApiData NarRequest where
   toUrlPiece (NarRequest key ctype) = key <> compTypeToExt ctype
+
+-- | Requesting information about a nix archive, by providing its store prefix.
+newtype NarInfoReq = NarInfoReq StorePrefix
+
+-- | Store prefixes are used to request NAR information.
+instance ToHttpApiData NarInfoReq where
+  toUrlPiece (NarInfoReq (StorePrefix prefix)) = prefix <> ".narinfo"

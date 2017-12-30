@@ -9,7 +9,7 @@ import Nix.StorePath (getNixStoreDir, parseStorePath)
 getNixStorePaths :: Int -> IO [StorePath]
 getNixStorePaths count = do
   NixStoreDir d <- getNixStoreDir
-  list <- listDirectory d
+  list <- reverse <$> listDirectory d
   pure $ take count $ catMaybes $ flip map list $ \txt -> do
     case parseStorePath (pack txt) of
       Left _ -> Nothing

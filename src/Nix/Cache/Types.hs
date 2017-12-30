@@ -71,10 +71,3 @@ instance MimeUnrender OctetStream NixCacheInfo where
   mimeUnrender _ bstring = case parse parseKVMap bstring of
     Done _ kvmap -> fromKVMap kvmap
     Fail _ _ message -> Left message
-
--- | Requesting information about a nix archive, by providing its store prefix.
-newtype NarInfoReq = NarInfoReq StorePrefix
-
--- | Store prefixes are used to request NAR information.
-instance ToHttpApiData NarInfoReq where
-  toUrlPiece (NarInfoReq (StorePrefix prefix)) = prefix <> ".narinfo"
