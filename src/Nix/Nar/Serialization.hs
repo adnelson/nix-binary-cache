@@ -3,17 +3,23 @@
 module Nix.Nar.Serialization where
 
 import ClassyPrelude hiding (take, try, Builder)
-import Data.Binary
-import Data.Binary.Get (getInt64le, getByteString, skip, lookAhead, label)
+#ifdef USE_CEREAL
+#define BINARY_CLASS Serialize
+import Data.Serialize (Serialize(get, put), Put, Get, runGetLazy)
+import Data.Serialize (putByteString, getByteString, execPut)
+import Data.Serialize (getInt64le, putInt64le, label, lookAhead, skip)
+#else
+#define BINARY_CLASS Binary
+import Data.Binary (Binary(put, get))
+import Data.Binary.Get (Get, getInt64le, getByteString, skip, lookAhead, label)
 import Data.Binary.Get (runGetOrFail)
 import Data.Binary.Put (Put, putByteString, putInt64le, execPut)
+#endif
 import Data.ByteString.Builder (toLazyByteString)
--- import Data.Attoparsec.ByteString (Parser, take, many', try, choice, string)
--- import Data.Attoparsec.Lazy (Result(Fail, Done), parse)
 import qualified Data.HashMap.Strict as H
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
--- import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Lazy as BL
 import Servant (MimeUnrender(..), OctetStream, MimeRender(..))
 
 
@@ -21,17 +27,17 @@ import Nix.StorePath (NixStoreDir(..), StorePath(..))
 import Nix.StorePath (parseFullStorePath, spToFull)
 import Nix.Nar.Types
 
--- | Wrap the Int64 type to create custom Binary instance
+-- | Wrap the Int64 type to create custom BINARY_CLASS instance
 newtype NarInt = NarInt Int deriving (Show, Eq, Ord, Num)
 
 -- NarInts are written as a 8 bytes in little endian format
-instance Binary NarInt where
+instance BINARY_CLASS NarInt where
   put (NarInt n) = putInt64le $ fromIntegral n
   get = NarInt . fromIntegral <$> getInt64le
 
--- | Wrap to create custom Binary instance
+-- | Wrap to create custom BINARY_CLASS instance
 newtype NarString = NarString ByteString deriving (Show, Eq, Ord, IsString)
-instance Binary NarString where
+instance BINARY_CLASS NarString where
   put (NarString s) = put (NarInt $ length s) *> putByteString (padTo8 s)
     where padTo8 bs | length bs `mod` 8 == 0 = bs
           padTo8 bs = bs <> replicate (8 - (length bs `mod` 8)) 0
@@ -88,7 +94,7 @@ getStorePath = do
     Left err -> fail err
     Right (sd, sp) -> pure (sd, sp)
 
-instance Binary NarElement where
+instance BINARY_CLASS NarElement where
   put element = inParens internal where
     inParens p = putNS "(" *> p *> putNS ")"
     internal = case element of
@@ -133,11 +139,11 @@ instance Binary NarElement where
         (t :: NarString) -> do
           fail ("unsupported element type: " <> show t)
 
-instance Binary Nar where
+instance BINARY_CLASS Nar where
   get = label "Nar" $ Nar <$> (getExactNS "nix-archive-1" *> get)
   put (Nar elem) = putNS "nix-archive-1" >> put elem
 
-instance Binary NarExport where
+instance BINARY_CLASS NarExport where
   put (NarExport {..}) = do
     -- Write the NAR surrounded by constants
     putByteString magicExportStartConstant
@@ -198,15 +204,20 @@ instance Binary NarExport where
 instance MimeRender OctetStream Nar where
   mimeRender _ = toLazyByteString . execPut . put
 
+runGet_ :: BINARY_CLASS a => BL.ByteString -> Either String a
+#ifdef USE_CEREAL
+runGet_ = runGetLazy get
+#else
+runGet_ bs = case runGetOrFail get bs of
+  Right (_, _, a) -> Right a
+  Left (_, _, err) -> Left err
+#endif
+
 instance MimeUnrender OctetStream Nar where
-  mimeUnrender _ bs = case runGetOrFail get bs of
-    Right (_, _, nar) -> pure nar
-    Left (_, _, err) -> Left err
+  mimeUnrender _ bs = runGet_ bs
 
 instance MimeRender OctetStream NarExport where
   mimeRender _ = toLazyByteString . execPut . put
 
 instance MimeUnrender OctetStream NarExport where
-  mimeUnrender _ bs = case runGetOrFail get bs of
-    Right (_, _, export) -> pure export
-    Left (_, _, err) -> Left err
+  mimeUnrender _ bs = runGet_ bs

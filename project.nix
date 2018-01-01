@@ -3,6 +3,9 @@
 let
   pname = "nix-binary-cache";
 
+  binaryLibrary = if builtins.getEnv "USE_CEREAL" != ""
+                  then "cereal" else "binary";
+
   version = "0.0.1";
   # Haskell packages the library depends on (in addition to above). We
   # use names here because for some reason some of these are null in
@@ -11,7 +14,7 @@ let
     "aeson"
     "attoparsec"
     "base"
-    "binary"
+    binaryLibrary
     "bytestring"
     "bytestring-conversion"
     "base64-bytestring"
@@ -125,7 +128,8 @@ let
   # so define a cpp flag.
   cpp-options = optional
     (compareVersions haskellPackages.servant.version "0.7" < 0)
-    "-DOLD_SERVANT";
+    "-DOLD_SERVANT" ++
+    optional (binaryLibrary == "cereal") "-DUSE_CEREAL";
 
   # .ghci file text.
   dotGhci = pkgs.writeText "${pname}.ghci" (joinLines (
@@ -165,6 +169,7 @@ let
       default-language:    Haskell2010
       default-extensions:  ${joinCommas extensions}
       ghc-options:         -O3 ${joinSpaces ghc-build-options}
+      cpp-options:         ${joinSpaces cpp-options}
 
     ${if false then "" else ''
     executable ref-cache
@@ -174,6 +179,7 @@ let
       default-language:    Haskell2010
       default-extensions:  ${joinCommas extensions}
       ghc-options:         -O3 ${joinSpaces ghc-build-options}
+      cpp-options:         ${joinSpaces cpp-options}
     ''}
 
     ${if true then "" else ''
