@@ -1,11 +1,12 @@
 -- | Cache store paths and their references
 module Nix.ReferenceCache (
-  NixReferenceCache(..),
+  ReferenceCache(..),
   newReferenceCache,
   initializeReferenceCache,
   getReferences,
   getReferencesIncludeSelf,
-  recordReferences
+  recordReferences,
+  computeClosure
   ) where
 
 import Database.SQLite.Simple (Connection, Query, Only(..), lastInsertRowId)
@@ -45,7 +46,7 @@ getPathCacheLocation = lookupEnv "CLIENT_SQLITE_CACHE" >>= \case
     Just home -> pure (home </> ".nix-client-cache")
 
 -- | Path reference cache, backed by sqlite
-data NixReferenceCache = NixReferenceCache {
+data ReferenceCache = ReferenceCache {
   nprcStoreDir :: NixStoreDir,
   -- ^ Location of the nix store.
   nprcLocalNixDbConnection :: Maybe Connection,
@@ -74,7 +75,7 @@ attemptLocalNixConnection dbpath = do
     putStrLn $ "Can't use local nix SQLite database: " <> tshow err
     pure Nothing
 
-newReferenceCache :: IO NixReferenceCache
+newReferenceCache :: IO ReferenceCache
 newReferenceCache = do
   nprcCacheLocation <- getPathCacheLocation
   nprcLocalNixDbConnection <- attemptLocalNixConnection =<< getNixDBDir
@@ -83,11 +84,11 @@ newReferenceCache = do
   nprcConnection <- newMVar =<< open nprcCacheLocation
   nprcPathIdCache <- newMVar mempty
   nprcPathReferences <- newMVar mempty
-  pure NixReferenceCache {..}
+  pure ReferenceCache {..}
 
 -- | Get the references of an object by asking either a nix command or the DB.
 -- This information is cached by the caller of this function.
-getRefs :: NixReferenceCache -> StorePath -> IO PathSet
+getRefs :: ReferenceCache -> StorePath -> IO PathSet
 getRefs cache spath = case nprcLocalNixDbConnection cache of
   -- We can't access the DB directly. Use the CLI.
   Nothing -> getRefsFromNixCommand cache spath
@@ -104,7 +105,7 @@ getRefs cache spath = case nprcLocalNixDbConnection cache of
     map HS.fromList $ map snd <$> mapM ioParseFullStorePath (map fromOnly refs)
 
 -- | Get references of a path by querying the nix CLI.
-getRefsFromNixCommand :: NixReferenceCache -> StorePath -> IO PathSet
+getRefsFromNixCommand :: ReferenceCache -> StorePath -> IO PathSet
 getRefsFromNixCommand cache spath = do
   let nixStoreCmd = unpackNixBinDir (nprcBinDir cache) </> "nix-store"
       storeDir = nprcStoreDir cache
@@ -113,6 +114,22 @@ getRefsFromNixCommand cache spath = do
     (ExitSuccess, stdout, _) -> map HS.fromList $ do
       map snd <$> mapM ioParseFullStorePath (splitWS stdout)
     (ExitFailure code, _, stderr) -> error msg
+      where cmd = nixStoreCmd <> " " <> intercalate " " args
+            msg' = cmd <> " failed with " <> show code
+            msg = msg' <> unpack (if T.strip stderr == "" then ""
+                                  else "\nSTDERR:\n" <> stderr)
+
+-- | Get the full runtime path dependency closure of a store path.
+computeClosure :: ReferenceCache -> StorePath -> IO [StorePath]
+computeClosure cache path = do
+  let nixStoreCmd = unpackNixBinDir (nprcBinDir cache) </> "nix-store"
+      storeDir = nprcStoreDir cache
+      args = ["-qR", spToFull storeDir path]
+  readProcessWithExitCode nixStoreCmd args "" >>= \case
+    (ExitSuccess, stdout, _) -> do
+      map snd <$> mapM ioParseFullStorePath (splitWS stdout)
+    (ExitFailure code, _, stderr) -> do
+      error msg
       where cmd = nixStoreCmd <> " " <> intercalate " " args
             msg' = cmd <> " failed with " <> show code
             msg = msg' <> unpack (if T.strip stderr == "" then ""
@@ -128,7 +145,7 @@ getPathsQuery = fromString $ concat [
 
 -- | Get the references of a path, checking and updating the cache.
 -- Doesn't filter out self-references.
-getReferencesIncludeSelf :: NixReferenceCache -> StorePath -> IO PathSet
+getReferencesIncludeSelf :: ReferenceCache -> StorePath -> IO PathSet
 getReferencesIncludeSelf cache path = do
   getReferencesFromCache cache path >>= \case
     Just refs -> pure refs
@@ -138,7 +155,7 @@ getReferencesIncludeSelf cache path = do
       recordReferences cache path refs
       pure refs
 
-getReferences :: NixReferenceCache -> StorePath -> IO PathSet
+getReferences :: ReferenceCache -> StorePath -> IO PathSet
 getReferences cache path = do
   allrefs <- getReferencesIncludeSelf cache path
   pure $ HS.delete path allrefs
@@ -146,7 +163,7 @@ getReferences cache path = do
 -- | Get a store path's references from the cache. Return Nothing if
 -- the path isn't recorded in the cache yet. Caches in memory.
 getReferencesFromCache
-  :: NixReferenceCache -> StorePath -> IO (Maybe PathSet)
+  :: ReferenceCache -> StorePath -> IO (Maybe PathSet)
 getReferencesFromCache cache path = do
   modifyMVar (nprcPathReferences cache) $ \tree -> do
     case H.lookup path tree of
@@ -169,7 +186,7 @@ getReferencesFromCache cache path = do
             _ -> pure (tree, Nothing)
 
 -- | Get a store path's ID. Caches in memory.
-getPathId :: NixReferenceCache -> StorePath -> IO (Maybe Int64)
+getPathId :: ReferenceCache -> StorePath -> IO (Maybe Int64)
 getPathId cache path = do
   modifyMVar (nprcPathIdCache cache) $ \pathIdCache -> do
     case H.lookup path pathIdCache of
@@ -184,7 +201,7 @@ getPathId cache path = do
             pure (pathIdCache, Nothing)
 
 -- | Store the references of a path. Caches in memory and in the DB.
-recordReferences :: NixReferenceCache -> StorePath -> PathSet -> IO ()
+recordReferences :: ReferenceCache -> StorePath -> PathSet -> IO ()
 recordReferences cache path refs = getPathId cache path >>= \case
   Nothing -> error "Can't add references, path hasn't been stored"
   Just pathId -> do
@@ -208,7 +225,7 @@ recordReferences cache path refs = getPathId cache path >>= \case
 -- 2. In the database: add the ID to the in-memory cache, return it.
 -- 3. Not in the database: add it to the database, add new ID to the
 --    in-memory cache, and return it.
-addPath :: NixReferenceCache -> StorePath -> IO Int64
+addPath :: ReferenceCache -> StorePath -> IO Int64
 addPath cache path = do
   modifyMVar (nprcPathIdCache cache) $ \pathIdCache -> do
     case H.lookup path pathIdCache of
@@ -226,7 +243,7 @@ addPath cache path = do
 
 
 -- | Create the tables in the path cache
-initializeReferenceCache :: NixReferenceCache -> IO ()
+initializeReferenceCache :: ReferenceCache -> IO ()
 initializeReferenceCache nprc = do
   withMVar (nprcConnection nprc) $ \conn -> do
     execute_ conn $ fromString $

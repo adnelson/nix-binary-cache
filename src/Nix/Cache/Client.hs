@@ -12,9 +12,7 @@ import Servant.Client (BaseUrl(..), ClientM, ClientEnv(ClientEnv), Scheme(..))
 import Servant.Client (runClientM, client, ServantError(FailureResponse))
 import Servant.Common.BaseUrl (parseBaseUrl)
 import System.Environment (lookupEnv)
-import System.Exit (ExitCode(ExitSuccess, ExitFailure))
 import System.IO (IO, stdout, stderr, hSetBuffering, BufferMode(LineBuffering))
-import System.Process.Text (readProcessWithExitCode)
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.HashMap.Strict as H
 import qualified Data.HashSet as HS
@@ -125,7 +123,7 @@ data NixClientObj = NixClientObj {
   -- ^ Mutable state of the client.
   ncoManager :: Manager,
   -- ^ HTTP connection manager client uses to connect.
-  ncoReferenceCache :: NixReferenceCache,
+  ncoReferenceCache :: ReferenceCache,
   -- ^ Database connection for the local cache. Syncronized in MVar to
   -- allow lastrowid to be deterministic
   ncoLogMutex :: MVar (),
@@ -264,23 +262,6 @@ clientRequestEither req = do
 -- * Nix client actions
 -------------------------------------------------------------------------------
 
--- | Get the full runtime path dependency closure of a store path.
-getClosure :: StorePath -> NixClient [StorePath]
-getClosure path = do
-  NixBinDir nixBin <- nccBinDir . ncoConfig <$> ask
-  storeDir <- nccStoreDir . ncoConfig <$> ask
-  let nix_store = nixBin </> "nix-store"
-      args = ["-qR", spToFull storeDir path]
-  liftIO $ readProcessWithExitCode nix_store args "" >>= \case
-    (ExitSuccess, stdout, _) -> do
-      map snd <$> mapM ioParseFullStorePath (splitWS stdout)
-    (ExitFailure code, _, stderr) -> do
-      error msg
-      where cmd = nix_store <> " " <> intercalate " " args
-            msg' = cmd <> " failed with " <> show code
-            msg = msg' <> unpack (if T.strip stderr == "" then ""
-                                  else "\nSTDERR:\n" <> stderr)
-
 -- | Do a nix client action inside of the semaphore
 inSemaphore :: NixClient a -> NixClient a
 inSemaphore action = bracket getSem releaseSem (\_ -> action) where
@@ -336,7 +317,9 @@ queryStorePaths paths = do
   let count paths = len <> " path" <> if len == "1" then "" else "s"
         where len = tshow $ length paths
   ncDebug $ "Computing full closure of " <> count paths <> "."
-  pathsToSend <- HS.fromList . concat <$> mapM getClosure paths
+  cache <- ncoReferenceCache <$> ask
+  pathsToSend <- map (HS.fromList . concat) $ forM paths $ \path -> do
+    liftIO $ computeClosure cache path
   ncDebug $ "Full closure contains " <> count pathsToSend <> "."
   storeDir <- nccStoreDir . ncoConfig <$> ask
   -- Convert the path list to full paths and convert that to a vector.
