@@ -6,8 +6,6 @@ module Nix.Nar (
   ) where
 
 import ClassyPrelude
-import Data.Binary (get)
-import Data.Binary.Get (runGetOrFail, Get)
 import Nix.Nar.Types
 import Nix.Nar.Serialization
 import Nix.Bin (NixBinDir, nixCmd)
@@ -18,11 +16,9 @@ getNar :: NixBinDir -> NixStoreDir -> StorePath -> IO Nar
 getNar nixBin nsdir spath = do
   let path = spToFull nsdir spath
   narBytes <- nixCmd nixBin "store" ["--dump", path]
-  case runGetOrFail (get :: Get Nar) (fromStrict narBytes) of
-    Right (_, _, nar) -> pure nar
-    Left (_, c, e) -> error $
-      concat ["In file " <> show path <> ":\n",
-              "Character " <> show c <> ": " <> e]
+  case runGet_ (fromStrict narBytes) of
+    Right nar -> pure nar
+    Left err -> error $ concat ["In file " <> show path <> ":\n", err]
 
 
 -- | Ask nix for an export of a store object.
@@ -30,8 +26,6 @@ getNarExport :: NixBinDir -> NixStoreDir -> StorePath -> IO NarExport
 getNarExport nixBin nsdir spath = do
   let path = spToFull nsdir spath
   narBytes <- nixCmd nixBin "store" ["--export", path]
-  case runGetOrFail get (fromStrict narBytes) of
-    Right (_, _, nar) -> pure nar
-    Left (_, c, e) -> error $
-      concat ["In file " <> show path <> ":\n",
-              "Character " <> show c <> ": " <> e]
+  case runGet_ (fromStrict narBytes) of
+    Right nar -> pure nar
+    Left err -> error $ concat ["In file " <> show path <> ":\n", err]
