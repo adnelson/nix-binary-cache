@@ -5,28 +5,13 @@ module Nix.Cache.Types where
 import qualified Data.Text as T
 import Data.Attoparsec.ByteString.Lazy (Result(..), parse)
 import Data.Aeson (ToJSON, FromJSON)
-import Servant (MimeUnrender(..), OctetStream, ToHttpApiData(..), Accept(..),
+import Servant (MimeUnrender(..), OctetStream, Accept(..),
                 Proxy(..), MimeRender(..))
 import Network.HTTP.Media ((//))
 import Codec.Compression.GZip (compress, decompress)
 
 import Data.KVMap
 import Nix.Cache.Common
-import Nix.StorePath (StorePrefix(..))
-
--- | Type to represent the binary/octet-stream content type, which is
--- equivalent to application/octet-stream.
-data BOctetStream
-
-instance Accept BOctetStream where
-  contentType _ = "binary" // "octet-stream"
-
--- | Convert OctetStream instances to BOctetStream instances. This is
--- why we need UndecidableInstances above.
-instance MimeUnrender OctetStream t =>
-         MimeUnrender BOctetStream t where
-  mimeUnrender _ = mimeUnrender (Proxy :: Proxy OctetStream)
-
 
 -- | Represents binary data compressed with gzip.
 data GZipped
