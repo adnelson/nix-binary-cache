@@ -301,9 +301,19 @@ getNarInfo path = inSemaphore $ do
   let req = NarInfoReq (spPrefix path)
   clientRequestEither (narInfo req) >>= \case
     Right info -> pure $ Just info
-    Left err -> case err of
-      FailureResponse _ (Status 404 _) _ _ -> pure Nothing
-      _ -> throw $ PathFailedToGetNarInfo path err
+    Left err -> case errorIs404 err of
+      True -> pure Nothing
+      False -> throw $ PathFailedToGetNarInfo path err
+
+-- | Return true if a servant error is a 404.
+errorIs404 :: ServantError -> Bool
+#if MIN_VERSION_servant_client(0,11,0)
+errorIs404 (FailureResponse _ (Status 404 _) _ _) = True
+#else
+errorIs404 (FailureResponse (Status 404 _) _ _) = True
+#endif
+errorIs404 _ = False
+
 
 -- | If the server in question doesn't support the /query-paths route,
 -- instead the NarInfo of each path can be requested from the server as a
@@ -339,9 +349,9 @@ queryStorePaths paths = do
     Right r -> map H.fromList $ forM (H.toList r) $ \(pathStr, onServer) -> do
       spath <- snd <$> ioParseFullStorePath (pack pathStr)
       pure (spath, onServer)
-    Left err -> case err of
-      FailureResponse _ (Status 404 _) _ _ -> getPathsOnServerWithNarInfo paths
-      _ -> throw err
+    Left err -> case errorIs404 err of
+      True -> getPathsOnServerWithNarInfo paths
+      False -> throw err
   -- Split the dictionary into two lists.
   result <- flip execStateT (mempty, mempty) $ do
     forM_ (H.toList pathResults) $ \(spath, isInRepo) -> do
