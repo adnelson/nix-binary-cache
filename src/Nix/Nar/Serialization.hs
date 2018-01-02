@@ -17,6 +17,7 @@ import Data.Binary.Put (Put, putByteString, putInt64le, execPut)
 #endif
 import Data.ByteString.Builder (toLazyByteString)
 import qualified Data.HashMap.Strict as H
+import qualified Data.HashSet as HS
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL
@@ -144,27 +145,28 @@ instance BINARY_CLASS Nar where
   put (Nar elem) = putNS "nix-archive-1" >> put elem
 
 instance BINARY_CLASS NarExport where
-  put (NarExport {..}) = do
+  put export = do
+    let NarMetadata {..} = neMetadata export
     -- Write the NAR surrounded by constants
     putByteString magicExportStartConstant
-    put neNar
+    put (neNar export)
     putByteString magicExportMetadataConstant
 
     -- Write the store path
-    put (NarString $ B8.pack $ spToFull neStoreDirectory neStorePath)
+    put (NarString $ B8.pack $ spToFull nmStoreDirectory nmStorePath)
 
     -- Write the references
-    put (NarInt $ length neReferences)
-    forM neReferences $ \sp -> do
-      put (NarString $ B8.pack $ spToFull neStoreDirectory sp)
+    put (NarInt $ length nmReferences)
+    forM (sort $ HS.toList nmReferences) $ \sp -> do
+      put (NarString $ B8.pack $ spToFull nmStoreDirectory sp)
 
     -- If there's a deriver, write it. Otherwise an empty string
-    put $ case neDeriver of
+    put $ case nmDeriver of
       Nothing -> ""
-      Just sp -> NarString $ B8.pack $ spToFull neStoreDirectory sp
+      Just sp -> NarString $ B8.pack $ spToFull nmStoreDirectory sp
 
     -- If no signature, put 0, else 1 and then the signature
-    case neSignature of
+    case nmSignature of
       Nothing -> put (NarInt 0)
       Just sig -> put (NarInt 1) *> put (NarString sig)
 
@@ -178,20 +180,20 @@ instance BINARY_CLASS NarExport where
     getThisByteString magicExportMetadataConstant
 
     -- Get the store path of the exported object
-    (neStoreDirectory, neStorePath) <- getStorePath
+    (nmStoreDirectory, nmStorePath) <- getStorePath
     -- Get the references
-    neReferences <- do
+    nmReferences <- HS.fromList <$> do
       NarInt numReferences <- get
       forM [0 .. (numReferences - 1)] $ \_ -> do
         snd <$> getStorePath
     -- Get the deriver (optional)
-    neDeriver <- getSomeNS >>= \case
+    nmDeriver <- getSomeNS >>= \case
       "" -> pure Nothing
       raw -> case parseFullStorePath (decodeUtf8 raw) of
         Left err -> fail err
         Right (_, path) -> pure $ Just path
     -- Get the signature (optional)
-    neSignature <- get >>= \case
+    nmSignature <- get >>= \case
       (0 :: NarInt) -> pure Nothing
       1 -> Just <$> getSomeNS
       n -> fail ("Expected either 0 or 1 before the signature, got " <> show n)
@@ -199,7 +201,7 @@ instance BINARY_CLASS NarExport where
     -- Consume the final 8 bytes
     getByteString 8
 
-    pure NarExport {..}
+    pure $ NarExport neNar (NarMetadata {..})
 
 runGet_ :: BINARY_CLASS a => BL.ByteString -> Either String a
 #ifdef USE_CEREAL

@@ -1,6 +1,7 @@
 module Nix.Cache.Client where
 
 import Control.Concurrent.Async.Lifted (wait)
+import Control.Exception.Base (PatternMatchFail)
 import Control.Monad.State.Strict (execStateT, modify)
 import GHC.Conc (getNumProcessors)
 import Network.HTTP.Client (Manager, Request(..), ManagerSettings(..))
@@ -8,11 +9,15 @@ import Network.HTTP.Client (newManager, defaultManagerSettings, responseHeaders)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Servant ((:<|>)(..), Proxy(Proxy))
 import Servant.Client (BaseUrl(..), ClientM, ClientEnv(ClientEnv), Scheme(..))
-import Servant.Client (runClientM, client, ServantError)
+import Servant.Client (runClientM, client, ServantError, responseBody)
 import Servant.Common.BaseUrl (parseBaseUrl)
+import System.Directory (getTemporaryDirectory)
 import System.Environment (lookupEnv)
-import System.IO (IO, stdout, stderr, hSetBuffering, BufferMode(LineBuffering))
+import System.IO (openBinaryTempFileWithDefaultPermissions)
+import System.IO (stdout, stderr, hSetBuffering, BufferMode(LineBuffering))
 import qualified Data.ByteString.Base64 as B64
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Lazy.Char8 as BL8
 import qualified Data.HashMap.Strict as H
 import qualified Data.HashSet as HS
 import qualified Data.Text as T
@@ -24,11 +29,13 @@ import Nix.Cache.Common
 import Nix.Bin (NixBinDir, getNixBinDir, nixCmd)
 import Nix.Cache.API (NixCacheAPI)
 import Nix.Cache.Client.Misc (getNixStorePaths)
+import Nix.Cache.Logger
 import Nix.Cache.Types (NixCacheInfo(storeDir))
 import Nix.Derivation -- (Derivation(..), parseDeriv
-import Nix.Nar (Nar, NarExport, getNarExport, importNarExport)
+import Nix.Nar (Nar, NarExport(..), NarMetadata(..))
+import Nix.Nar (getNarExport, importNarExport)
 import Nix.NarInfo (NarInfo(references, narReq), NarInfoReq(..), NarRequest)
-import Nix.ReferenceCache (ReferenceCache, addPath)
+import Nix.ReferenceCache (ReferenceCache, addPath, getDeriver)
 import Nix.ReferenceCache (computeClosure, recordReferences, getReferences)
 import Nix.ReferenceCache (newReferenceCache, initializeReferenceCache)
 import Nix.StorePath (NixStoreDir, StorePath(spPrefix), PathSet)
@@ -108,18 +115,22 @@ instance Exception NixClientError
 
 -- | Configuration of the nix client.
 data NixClientConfig = NixClientConfig {
+  -- | Location of the nix store.
   nccStoreDir :: NixStoreDir,
-  -- ^ Location of the nix store.
+  -- | Location of nix binaries.
   nccBinDir :: NixBinDir,
-  -- ^ Location of nix binaries.
+  -- | Base url of the nix binary cache.
   nccCacheUrl :: BaseUrl,
-  -- ^ Base url of the nix binary cache.
+  -- | Optional auth for the nix cache, if using HTTPS.
   nccCacheAuth :: Maybe NixCacheAuth,
-  -- ^ Optional auth for the nix cache, if using HTTPS.
+  -- | Max number of concurrent tasks
   nccMaxWorkers :: Int,
-  -- ^ Max number of concurrent tasks
-  nccLogLevel :: LogLevel
-  -- ^ Minimum level of logging messages to show.
+  -- | Minimum level of logging messages to show.
+  nccLogLevel :: LogLevel,
+  -- | Number of retries for sends.
+  nccSendRetry :: Int,
+  -- | Number of retries for fetches.
+  nccFetchRetry :: Int
   } deriving (Show, Generic)
 
 -- | Create a particular kind of async action for sending a path
@@ -150,8 +161,8 @@ data NixClientObj = NixClientObj {
   -- | Database connection for the local cache. Syncronized in MVar to
   -- allow lastrowid to be deterministic
   ncoReferenceCache :: ReferenceCache,
-  -- | Syncronizes logs of the client so they don't overlap.
-  ncoLogMutex :: MVar (),
+  -- | Client logger.
+  ncoLogger :: Logger,
   -- | Limits the number of concurrent client operations.
   ncoSemaphore :: QSem
   }
@@ -170,6 +181,9 @@ loadClientConfig = do
   nccLogLevel <- (>>= readMay) <$> lookupEnv "LOG_LEVEL" >>= \case
     Just level -> pure level
     _ -> return LOG_INFO
+  -- TODO make configurable
+  nccSendRetry <- pure 3
+  nccFetchRetry <- pure 3
   nccBinDir <- getNixBinDir
   pure NixClientConfig {..}
 
@@ -177,16 +191,17 @@ loadClientConfig = do
 runNixClientWithConfig :: NixClientConfig -> NixClient a -> IO a
 runNixClientWithConfig cfg action = do
   semaphore <- newQSem (nccMaxWorkers cfg)
-  manager <- mkManager cfg
-  state <- NixClientState <$> newMVar mempty <*> newMVar mempty
-                          <*> newMVar Nothing
-  logMVar <- newMVar ()
-  cache <- newReferenceCache
-  initializeReferenceCache cache
-  let obj = NixClientObj cfg state manager cache logMVar semaphore
-  -- Perform the action and then update the cache.
-  result <- runReaderT (action) obj
-  pure result
+  -- TODO don't only log to stdout
+  withLogger stdout (nccLogLevel cfg) $ \logger -> do
+    manager <- mkManager cfg logger
+    state <- NixClientState <$> newMVar mempty <*> newMVar mempty
+                            <*> newMVar Nothing
+    cache <- newReferenceCache
+    initializeReferenceCache cache
+    let obj = NixClientObj cfg state manager cache logger semaphore
+    -- Perform the action and then update the cache.
+    result <- runReaderT (action) obj
+    pure result
 
 -- | Run the nix client monad.
 runNixClient :: NixClient a -> IO a
@@ -198,25 +213,13 @@ runNixClient action = do
 -- * Nix client logging
 -------------------------------------------------------------------------------
 
--- | Four levels of logging.
-data LogLevel
-  = LOG_DEBUG | LOG_INFO | LOG_WARN | LOG_FATAL
-  deriving (Show, Read, Eq, Ord)
-
 -- | Logger. Writes to stdout and checks level to see if it should
 -- print. Writes are mutexed so that it's threadsafe.
 ncLog :: LogLevel -> Text -> NixClient ()
-ncLog level message = do
-  minlevel <- nccLogLevel . ncoConfig <$> ask
-  when (level >= minlevel) $ do
-    logmv <- ncoLogMutex <$> ask
-    withMVar logmv $ \_ -> do
-      case level <= LOG_DEBUG of
-        True -> do
-          tid <- tshow <$> myThreadId
-          putStrLn $ tid <> ": " <> message
-        False -> do
-          putStrLn message
+ncLog level message = liftIO . logAtLevel level message =<< ncoLogger <$> ask
+
+ncLowDebug :: Text -> NixClient ()
+ncLowDebug = ncLog LOG_LOWLEVEL_DEBUG
 
 ncDebug :: Text -> NixClient ()
 ncDebug = ncLog LOG_DEBUG
@@ -235,25 +238,28 @@ ncFatal = ncLog LOG_FATAL
 -------------------------------------------------------------------------------
 
 -- | Given some configuration, create the request manager.
-mkManager :: NixClientConfig -> IO Manager
-mkManager config = do
+mkManager :: NixClientConfig -> Logger -> IO Manager
+mkManager config logger = do
   let baseUrl = nccCacheUrl config
       mauth = nccCacheAuth config
       managerSettings = case baseUrlScheme baseUrl of
         Https -> tlsManagerSettings
         _ -> defaultManagerSettings
       -- A request modifier function, which adds the username/password
-      -- to the Authorization header.
-      modifyReq req = pure $ case mauth of
-        Nothing -> req
-        Just (NixCacheAuth username password) -> do
-          -- Encode the username:password in base64.
-          let auth = username <> ":" <> password
-          let authB64 = B64.encode $ T.encodeUtf8 auth
-          req {
-            requestHeaders = requestHeaders req `snoc`
-              ("Authorization", "Basic " <> authB64)
-          }
+      -- to the Authorization header. It also logs the request path.
+      modifyReq req = do
+        let msg = "Request: " <> tshow (method req) <> " " <> tshow (path req)
+        logAtLevel LOG_DEBUG msg logger
+        pure $ case mauth of
+          Nothing -> req
+          Just (NixCacheAuth username password) -> do
+            -- Encode the username:password in base64.
+            let auth = username <> ":" <> password
+            let authB64 = B64.encode $ T.encodeUtf8 auth
+            req {
+              requestHeaders = requestHeaders req `snoc`
+                ("Authorization", "Basic " <> authB64)
+            }
       modifyResponse resp = do
         let headers = H.fromList $ responseHeaders resp
             fixContentType = \case
@@ -283,7 +289,6 @@ clientRequestEither req = validateStoreDirectory >> do
   config <- ncoConfig <$> ask
   manager <- ncoManager <$> ask
   let env = ClientEnv manager (nccCacheUrl config)
-  ncDebug $ "Making request!"
   liftIO $ runClientM req env
 
 -- | Validate that the remote cache has the same store directory as
@@ -301,10 +306,11 @@ validateStoreDirectory = do
     -- Hasn't been done yet, validate and fill the mvar
     Nothing -> do
       modifyMVar_ mv $ \_ -> do
-        ncDebug "Validating remote nix store directory..."
         config <- ncoConfig <$> ask
         manager <- ncoManager <$> ask
-        let env = ClientEnv manager (nccCacheUrl config)
+        let url = nccCacheUrl config
+        ncDebug ("Validating nix store directory on cache " <> tshow url)
+        let env = ClientEnv manager url
         liftIO (runClientM fetchNixCacheInfo env) >>= \case
           Left err -> pure (Just $ Just $ FailedToReadNixCacheInfo err)
           Right info -> do
@@ -327,11 +333,11 @@ inSemaphore :: NixClient a -> NixClient a
 inSemaphore action = bracket getSem releaseSem (\_ -> action) where
   -- Acquire a resource from our semaphore.
   getSem = do
-    ncDebug "Waiting for semaphore"
+    ncLowDebug "Waiting for semaphore"
     waitQSem =<< asks ncoSemaphore
   -- Release the resource to the semaphore.
   releaseSem () = do
-    ncDebug "Releasing semaphore"
+    ncLowDebug "Releasing semaphore"
     signalQSem =<< asks ncoSemaphore
 
 -- | Get the NAR info for a store path by requesting to the server.
@@ -366,7 +372,7 @@ queryStorePaths paths = do
         where len = tshow $ length paths
   ncDebug $ "Computing full closure of " <> count paths <> "."
   cache <- ncoReferenceCache <$> ask
-  pathsToSend <- map (HS.fromList . concat) $ forM paths $ \path -> do
+  pathsToSend <- map concat $ forM paths $ \path -> do
     liftIO $ computeClosure cache path
   ncDebug $ "Full closure contains " <> count pathsToSend <> "."
   storeDir <- nccStoreDir . ncoConfig <$> ask
@@ -378,7 +384,6 @@ queryStorePaths paths = do
   ncDebug "Querying repo to see what paths it has"
   pathResults <- clientRequestEither (queryPaths $ pathsV) >>= \case
     Right r -> map H.fromList $ forM (H.toList r) $ \(pathStr, onServer) -> do
-      putStrLn "TURDBURGER"
       spath <- snd <$> ioParseFullStorePath (pack pathStr)
       pure (spath, onServer)
     Left err -> case errorIs404 err of
@@ -390,8 +395,8 @@ queryStorePaths paths = do
       modify $ \(inrepo, notinrepo) -> case isInRepo of
         True -> (HS.insert spath inrepo, notinrepo)
         False -> (inrepo, HS.insert spath notinrepo)
-  ncInfo $ count (fst result) <> " paths are already on the repo, and "
-        <> count (snd result) <> " paths are not."
+  ncInfo $ count (fst result) <> " are already on the repo, and "
+        <> count (snd result) <> " are not."
   pure result
 
 -- | Get the references of a path, using the server as a
@@ -401,7 +406,7 @@ queryStorePaths paths = do
 -- cache normal references. Otherwise, it's an error.
 getReferencesFallBackToServer :: StorePath -> NixClient PathSet
 getReferencesFallBackToServer spath = do
-  ncDebug $ "Getting references for " <> abbrevSP spath
+  ncLowDebug $ "Getting references for " <> abbrevSP spath
   cache <- ncoReferenceCache <$> ask
   liftIO (getReferences cache spath) >>= \case
     Just refs -> pure refs
@@ -409,7 +414,6 @@ getReferencesFallBackToServer spath = do
       Just info -> do
         let refs = references info
         refPaths <- map HS.fromList $ forM refs $ \path -> do
-          putStrLn $ "FARTBOMB: " <> tshow path
           ioParseStorePath (pack path)
         liftIO $ do
           addPath cache spath
@@ -420,7 +424,7 @@ getReferencesFallBackToServer spath = do
 -- | Get the references of a store path, using only local information.
 getReferencesLocally :: StorePath -> NixClient PathSet
 getReferencesLocally spath = do
-  ncDebug $ "Getting references for " <> abbrevSP spath <> " (local)"
+  ncLowDebug $ "Getting references for " <> abbrevSP spath <> " (local)"
   cache <- ncoReferenceCache <$> ask
   liftIO (getReferences cache spath) >>= \case
     Nothing -> throw $ PathNotOnClient spath
@@ -445,13 +449,13 @@ fetchPath spath = do
           refActions <- forM (HS.toList refs) $ \ref -> do
             (,) ref <$> fetchPath ref
           forM_ refActions $ \(ref, AsyncFetch rAction) -> do
-            ncDebug $ concat [abbrevSP spath, " is waiting for ",
-                              abbrevSP ref, " to finish fetching (",
-                              tshow $ asyncThreadId rAction, ")"]
+            ncLowDebug $ concat [abbrevSP spath, " is waiting for ",
+                                 abbrevSP ref, " to finish fetching (",
+                                 tshow $ asyncThreadId rAction, ")"]
             wait rAction
-            ncDebug $ abbrevSP ref <> " finished"
-          ncDebug $ "Parent paths have finished fetching, now fetching "
-                 <> abbrevSP spath <> " itself..."
+            ncLowDebug $ abbrevSP ref <> " finished"
+          ncLowDebug $ "Parent paths have finished fetching, now fetching "
+                    <> abbrevSP spath <> " itself..."
           -- Once parents are fetched, fetch the path itself.
           fetchSinglePath spath
         return (H.insert spath action s, action)
@@ -483,7 +487,7 @@ fetchPaths spaths = do
     -- Create no-op actions for all of these.
     noopActions <- map H.fromList $ forM (HS.toList inRepo) $ \path -> do
       noopAction <- map AsyncFetch $ async $ do
-        ncDebug $ abbrevSP path <> " was already in the repo."
+        ncLowDebug $ abbrevSP path <> " was already in the repo."
       pure (path, noopAction)
     -- Update the state, inserting no-op actions for any paths which
     -- have already been sent.
@@ -504,7 +508,7 @@ sendPaths spaths = do
     -- Create no-op actions for all of these.
     noopActions <- map H.fromList $ forM (HS.toList inRepo) $ \path -> do
       noopAction <- map AsyncSend $ async $ do
-        ncDebug $ abbrevSP path <> " was already in the repo."
+        ncLowDebug $ abbrevSP path <> " was already in the repo."
       pure (path, noopAction)
     -- Update the state, inserting no-op actions for any paths which
     -- have already been sent.
@@ -531,13 +535,13 @@ sendPath spath = do
           refActions <- forM (HS.toList refs) $ \ref -> do
             (,) ref <$> sendPath ref
           forM_ refActions $ \(ref, AsyncSend rAction) -> do
-            ncDebug $ concat [abbrevSP spath, " is waiting for ",
-                              abbrevSP ref, " to finish sending (",
-                              tshow $ asyncThreadId rAction, ")"]
+            ncLowDebug $ concat [abbrevSP spath, " is waiting for ",
+                                 abbrevSP ref, " to finish sending (",
+                                 tshow $ asyncThreadId rAction, ")"]
             wait rAction
-            ncDebug $ abbrevSP ref <> " finished"
-          ncDebug $ "Parent paths have finished sending, now sending "
-                 <> abbrevSP spath <> " itself..."
+            ncLowDebug $ abbrevSP ref <> " finished"
+          ncLowDebug $ "Parent paths have finished sending, now sending "
+                    <> abbrevSP spath <> " itself..."
           -- Once parents are sent, send the path itself.
           sendSinglePath spath
         return (H.insert spath action s, action)
@@ -545,41 +549,81 @@ sendPath spath = do
 -- | Send a single path to a nix repo. This doesn't automatically
 -- include parent paths, so it generally shouldn't be used externally to
 -- this module (use sendPath instead)
---
--- TODO: retry logic? progress?
 sendSinglePath :: StorePath -> NixClient ()
-sendSinglePath p = inSemaphore $ do
-  ncDebug $ "Getting nar data for " <> abbrevSP p <> "..."
-  storeDir <- nccStoreDir . ncoConfig <$> ask
-  binDir <- nccBinDir . ncoConfig <$> ask
-  export <- liftIO $ getNarExport binDir storeDir p
-  ncInfo $ "Sending " <> abbrevSP p
-  clientRequestEither (sendNarExport export) >>= \case
-    Right _ -> pure ()
-    Left err -> throw $ PathFailedToSend p err
-  ncDebug $ "Finished sending " <> abbrevSP p
+sendSinglePath spath = go =<< nccSendRetry <$> ncoConfig <$> ask where
+  go retries = inSemaphore $ do
+    ncDebug $ "Getting nar data for " <> abbrevSP spath <> "..."
+    storeDir <- nccStoreDir . ncoConfig <$> ask
+    binDir <- nccBinDir . ncoConfig <$> ask
+    export <- liftIO $ getNarExport binDir storeDir spath
+    ncInfo $ "Sending " <> abbrevSP spath
+    clientRequestEither (sendNarExport export) >>= \case
+      Right _ -> ncDebug $ "Finished sending " <> abbrevSP spath
+      Left err | retries <= 0 -> throw $ PathFailedToSend spath err
+               | otherwise -> do
+                   ncLowDebug $ "Encountered error: " <> tshow err
+                   ncLowDebug $ "Retrying (" <> tshow retries <> ") remaining"
+                   go (retries - 1)
+
+-- | Get the NAR metadata for a store path.
+getMetadata :: StorePath -> NixClient NarMetadata
+getMetadata nmStorePath = do
+  cache <- ncoReferenceCache <$> ask
+  nmStoreDirectory <- nccStoreDir . ncoConfig <$> ask
+  nmDeriver <- join <$> liftIO (getDeriver cache nmStorePath)
+  nmReferences <- getReferencesLocally nmStorePath
+  -- TODO
+  nmSignature <- pure Nothing
+  pure NarMetadata {..}
+
+-- | Given a Nar and the path it corresponds to, build an export.
+makeNarExport :: StorePath -> Nar -> NixClient NarExport
+makeNarExport spath nar = NarExport nar <$> getMetadata spath
+
+-- | Replace a long response body with a redacted message, and write
+-- the body to a temporary file instead.
+redactResponse :: ServantError -> IO ServantError
+redactResponse err = redact `catch` \(_::PatternMatchFail) -> pure err where
+  redact = do
+    let body = responseBody err
+    case length body > 500 of
+      False -> pure err
+      True -> do
+        dir <- getTemporaryDirectory
+        body' <- bracket
+          (openBinaryTempFileWithDefaultPermissions dir "redacted-response-")
+          (\(_, handle) -> hClose handle)
+          (\(path, handle) -> do
+            BL.hPut handle body
+            pure $ "(Wrote long response body to " <> BL8.pack path <> ")")
+        pure err { responseBody = body' }
+
 
 -- | Fetch a single path from a nix repo. This doesn't automatically
 -- include parent paths, so it generally shouldn't be used externally to
 -- this module (use fetchPath instead)
---
--- TODO: retry logic? progress?
 fetchSinglePath :: StorePath -> NixClient ()
-fetchSinglePath p = inSemaphore $ do
-  ncDebug $ "Getting nar request URL for " <> abbrevSP p <> "..."
-  req <- getNarInfo p >>= \case
-    Nothing -> throw $ PathNotOnServer p
-    Just info -> pure $ narReq info
-  -- Use this request to fetch the store path.
-  clientRequestEither (fetchNar req) >>= \case
-    Left err -> throw $ PathFailedToFetch p err
-    Right nar -> do
-      let makeNarExport = undefined
-      export <- makeNarExport p nar
-      binDir <- nccBinDir . ncoConfig <$> ask
-      ncInfo $ "Importing " <> abbrevSP p
-      liftIO $ importNarExport binDir export
-      ncDebug $ "Finished fetching " <> abbrevSP p
+fetchSinglePath p = go =<< nccSendRetry <$> ncoConfig <$> ask where
+  go retries = inSemaphore $ do
+    ncLowDebug $ "Getting nar request URL for " <> abbrevSP p <> "..."
+    req <- getNarInfo p >>= \case
+      Nothing -> throw $ PathNotOnServer p
+      Just info -> pure $ narReq info
+    -- Use this request to fetch the store path.
+    clientRequestEither (fetchNar req) >>= \case
+      Left err | retries <= 0 -> do
+                   err' <- liftIO $ redactResponse err
+                   throw $ PathFailedToFetch p err'
+               | otherwise -> do
+                   ncLowDebug $ "Encountered error: " <> tshow err
+                   ncLowDebug $ "Retrying (" <> tshow retries <> ") remaining"
+                   go (retries - 1)
+      Right nar -> do
+        export <- makeNarExport p nar
+        binDir <- nccBinDir . ncoConfig <$> ask
+        ncInfo $ "Importing " <> abbrevSP p
+        liftIO $ importNarExport binDir export
+        ncDebug  $ "Finished fetching " <> abbrevSP p
 
 mytest :: IO ()
 mytest = do
@@ -592,10 +636,10 @@ mytest = do
                   nccLogLevel = LOG_DEBUG
                  }
   derivAndOuts <- nixCmd (nccBinDir cfg') "instantiate" [
-    "/Users/anelson/nixpkgs", "-A", "sqlite"
+    "/home/anelson/nixpkgs", "-A", "sqlite"
     ] ""
 
   runNixClientWithConfig cfg (fetchDerivation derivAndOuts *> ncInfo "finished")
   -- _ <- (P.!! 5) <$> getNixStorePaths 10
-  -- paths <- getNixStorePaths 20
+  -- paths <- getNixStorePaths 10
   -- runNixClientWithConfig cfg (sendPaths paths *> ncInfo "finished")

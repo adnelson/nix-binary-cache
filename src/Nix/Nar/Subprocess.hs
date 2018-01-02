@@ -3,7 +3,7 @@ module Nix.Nar.Subprocess where
 
 import ClassyPrelude
 
-import Nix.Nar.Types (Nar, NarExport(neStorePath))
+import Nix.Nar.Types (Nar, NarExport(neMetadata), NarMetadata(nmStorePath))
 import Nix.Nar.Serialization (runGet_, runPut_)
 import Nix.Bin (NixBinDir, nixCmd)
 import Nix.StorePath (StorePath, NixStoreDir, spToFull)
@@ -17,7 +17,6 @@ getNar nixBin nsdir spath = do
     Right nar -> pure nar
     Left err -> error $ concat ["In file " <> show path <> ":\n", err]
 
-
 -- | Ask nix for an export of a store object.
 getNarExport :: NixBinDir -> NixStoreDir -> StorePath -> IO NarExport
 getNarExport nixBin nsdir spath = do
@@ -30,7 +29,7 @@ getNarExport nixBin nsdir spath = do
 -- | Import a nix export into the nix store.
 importNarExport :: NixBinDir -> NarExport -> IO ()
 importNarExport nixBin export = do
-  let path = neStorePath export
+  let path = nmStorePath $ neMetadata export
   nixCmd nixBin "store" ["--import"] (runPut_ export)
     `catch` \(e :: SomeException) -> do
                 error $ "When importing " <> show path <> ": " <> show e

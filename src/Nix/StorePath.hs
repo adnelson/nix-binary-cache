@@ -21,11 +21,11 @@ newtype NixStoreDir = NixStoreDir FilePath
 
 -- | The 32-character prefix of an object in the nix store.
 newtype StorePrefix = StorePrefix Text
-  deriving (Show, Eq, Generic, Hashable, IsString)
+  deriving (Show, Eq, Ord, Generic, Hashable, IsString)
 
 -- | The hash and name of an object in the nix store.
 data StorePath = StorePath {spPrefix :: StorePrefix, spName :: Text}
-  deriving (Eq, Generic)
+  deriving (Eq, Ord, Generic)
 
 instance Show StorePath where
   show (StorePath (StorePrefix prefix) name) = unpack (prefix <> "-" <> name)
@@ -55,6 +55,18 @@ parseStorePath txt =
     [(_, [StorePrefix -> hash, name])] -> Right $ StorePath hash name
     _ -> Left $ show txt <> " does not appear to be a store basepath"
 
+-- | Parse a store path. The source can be either a full (absolute)
+-- path or a store (base) path.
+permissiveParseStorePath :: Text -> Either String StorePath
+permissiveParseStorePath txt = do
+  case (parseStorePath txt, parseFullStorePath txt) of
+    (Right spath, _) -> pure spath
+    (_, Right (_, spath)) -> pure spath
+    (Left err1, Left err2) -> Left $ concat [
+      "Not a base store path (", show err1, ") and not an absolute ",
+      "store path (", show err2, ")"
+      ]
+
 -- | Parse a store path from text. Probably not super efficient but oh well.
 parseFullStorePath :: Text -> Either String FullStorePath
 parseFullStorePath (T.unpack -> p) = case (takeDirectory p, takeFileName p) of
@@ -65,19 +77,17 @@ parseFullStorePath (T.unpack -> p) = case (takeDirectory p, takeFileName p) of
     storePath <- parseStorePath (T.pack base)
     pure (NixStoreDir storeDir, storePath)
 
--- | Parse a StorePath in the IO monad.
+-- | Parse a StorePath in the IO monad. The input can be absolute or base.
 ioParseStorePath :: MonadIO io => Text -> io StorePath
-ioParseStorePath txt = liftIO $ case parseStorePath txt of
+ioParseStorePath txt = liftIO $ case permissiveParseStorePath txt of
   Left err -> error err
   Right sp -> return sp
 
 -- | Parse a full store path in the IO monad.
 ioParseFullStorePath :: MonadIO io => Text -> io FullStorePath
-ioParseFullStorePath txt = do
-  putStrLn "FART!"
-  liftIO $ case parseFullStorePath txt of
-    Left err -> error err
-    Right result -> return result
+ioParseFullStorePath txt = liftIO $ case parseFullStorePath txt of
+  Left err -> error err
+  Right result -> return result
 
 -- | Given a nix store dir and a store path, produce a full file path.
 spToFull :: NixStoreDir -> StorePath -> FilePath
@@ -146,11 +156,10 @@ instance NixCmdReturn FullStorePath where
 
 instance NixCmdReturn StorePath where
   nixCmd nixBin cmd args input = do
-    (_ :: NixStoreDir, spath) <- nixCmd nixBin cmd args input
-    pure spath
+    ioParseStorePath =<< nixCmd nixBin cmd args input
 
 instance NixCmdReturn [StorePath] where
   nixCmd nixBin cmd args input = do
     rawPaths <- nixCmd nixBin cmd args input
     forM (T.lines rawPaths) $ \line ->
-      snd <$> ioParseFullStorePath line
+      ioParseStorePath line

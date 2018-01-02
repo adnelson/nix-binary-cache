@@ -3,7 +3,7 @@ module Nix.ReferenceCache (
   ReferenceCache(..),
   newReferenceCache, initializeReferenceCache,
   getReferences, getReferencesIncludeSelf, computeClosure,
-  addPath, recordReferences
+  addPath, recordReferences, getDeriver, recordDeriver
   ) where
 
 import Database.SQLite.Simple (Connection, Query, Only(..), lastInsertRowId)
@@ -18,7 +18,7 @@ import Nix.Cache.Common hiding (log)
 import Nix.Bin (NixBinDir(..), getNixBinDir, nixCmd)
 import Nix.StorePath (NixStoreDir(..), PathTree, PathSet, StorePath, spToText)
 import Nix.StorePath (getNixStoreDir, spToFull, parseStorePath, spToPath)
-import Nix.StorePath (ioParseFullStorePath)
+import Nix.StorePath (ioParseStorePath)
 
 -- | Figure out where to access the local nix state DB.
 getNixDBDir :: IO FilePath
@@ -57,6 +57,8 @@ data ReferenceCache = ReferenceCache {
   nprcPathIdCache :: MVar (HashMap StorePath Int64),
   -- | Computed store path dependency tree.
   nprcPathReferences :: MVar PathTree,
+  -- | Computed store path derivers. Not all paths have known derivers.
+  nprcPathDerivers :: MVar (HashMap StorePath (Maybe StorePath)),
   -- | Logging function.
   nprcLogger :: Maybe (Text -> IO ())
   }
@@ -86,15 +88,20 @@ newReferenceCache = do
   nprcConnection <- newMVar =<< open nprcCacheLocation
   nprcPathIdCache <- newMVar mempty
   nprcPathReferences <- newMVar mempty
+  nprcPathDerivers <- newMVar mempty
   let nprcLogger = pure putStrLn
   pure ReferenceCache {..}
 
 -- | Get the references of an object by asking either a nix command or the DB.
 -- This information is cached by the caller of this function.
-getRefs :: ReferenceCache -> StorePath -> IO (Maybe PathSet)
-getRefs cache spath = case nprcLocalNixDbConnection cache of
+getReferencesUncached :: ReferenceCache -> StorePath -> IO (Maybe PathSet)
+getReferencesUncached cache spath = case nprcLocalNixDbConnection cache of
   -- We can't access the DB directly. Use the CLI.
-  Nothing -> getRefsFromNixCommand cache spath
+  Nothing -> do
+    let storeDir = nprcStoreDir cache
+        args = ["--query", "--references", spToFull storeDir spath]
+    map (Just . HS.fromList) (nixCmd (nprcBinDir cache) "store" args "")
+      `catch` \(_::SomeException) -> pure Nothing
   -- Pull the references directly out of the database.
   Just conn -> do
     -- Ensure it's in the nix DB by getting its ID
@@ -105,21 +112,69 @@ getRefs cache spath = case nprcLocalNixDbConnection cache of
       [Only (nixPathId :: Int64)] -> do
         refs <- query conn getPathsQuery (Only nixPathId)
         map (Just . HS.fromList) $
-          map snd <$> mapM ioParseFullStorePath (map fromOnly refs)
+          mapM ioParseStorePath (map fromOnly refs)
       _ -> pure Nothing
 
+-- | Get a store path's deriver from the cache, and update the cache.
+--
+-- Note the return type here:
+-- * If the store path isn't in the database, we'll return Nothing
+-- * If it's in the database, but has no deriver, we'll return (Just Nothing)
+-- * Otherwise, we'll return (Just (Just <deriver path>))
+getDeriver :: ReferenceCache -> StorePath -> IO (Maybe (Maybe StorePath))
+getDeriver cache spath = do
+  let
+    getUncached = case nprcLocalNixDbConnection cache of
+      -- We can't access the DB directly. Use the CLI.
+      Nothing -> do
+        let storeDir = nprcStoreDir cache
+            args = ["--query", "--deriver", spToFull storeDir spath]
+            cmd = nixCmd (nprcBinDir cache) "store" args "" >>= \case
+              "unknown-deriver" -> pure (Just Nothing)
+              path -> Just . Just <$> ioParseStorePath path
+        catch cmd (\(_::SomeException) -> pure Nothing)
+      -- Pull the deriver directly out of the database.
+      Just conn -> do
+        -- Ensure it's in the nix DB by getting its ID
+        let qry = "select id, deriver from ValidPaths where path = ?"
+        let row = (Only $ spToFull (nprcStoreDir cache) spath)
+        log cache $ "Running query " <> tshow qry <> " with path " <> tshow row
+        query conn qry row >>= \case
+          [Only (Just deriverTxt)] -> Just . Just <$> ioParseStorePath deriverTxt
+          [Only Nothing] -> pure (Just Nothing)
+          _ -> pure Nothing
+    getFromCache = do
+      modifyMVar (nprcPathDerivers cache) $ \derivers -> do
+        case H.lookup spath derivers of
+          Just maybeDeriver -> pure (derivers, Just maybeDeriver)
+          Nothing -> getPathId cache spath >>= \case
+            Nothing -> pure (derivers, Nothing)
+            Just pathId -> do
+              conn <- readMVar (nprcConnection cache)
+              let qry = "select deriver from Paths where id = ?"
+              query conn qry (Only pathId) >>= \case
+                -- If references have been recorded, parse and return them
+                [Only (Just deriverText)] -> do
+                  mDeriver <- case deriverText of
+                                "unknown-deriver" -> pure Nothing
+                                path -> Just <$> ioParseStorePath path
+                  pure (H.insert spath mDeriver derivers, Just mDeriver)
+                _ -> pure (derivers, Nothing)
 
--- | Get references of a path by querying the nix CLI.
-getRefsFromNixCommand :: ReferenceCache -> StorePath -> IO (Maybe PathSet)
-getRefsFromNixCommand cache spath = do
-  let storeDir = nprcStoreDir cache
-      args = ["--query", "--references", spToFull storeDir spath]
-  map (Just . HS.fromList) (nixCmd (nprcBinDir cache) "store" args "")
-    `catch` \(_::SomeException) -> pure Nothing
+  getFromCache >>= \case
+    Just result -> pure $ Just result
+    Nothing -> do
+      log cache $ "no cached deriver for " <> tshow spath
+      getUncached >>= \case
+        Nothing -> pure Nothing
+        Just maybeDeriver -> do
+          addPath cache spath
+          recordDeriver cache spath maybeDeriver
+          pure $ Just maybeDeriver
 
 -- | Get the full runtime path dependency closure of a store path.
-computeClosure :: ReferenceCache -> StorePath -> IO [StorePath]
-computeClosure cache path = do
+computeClosure :: ReferenceCache -> StorePath -> IO PathSet
+computeClosure cache path = HS.fromList <$> do
   let storeDir = nprcStoreDir cache
   nixCmd (nprcBinDir cache) "store" ["-qR", spToFull storeDir path] ""
 
@@ -134,47 +189,44 @@ getPathsQuery = fromString $ concat [
 -- | Get the references of a path, checking and updating the cache.
 -- Doesn't filter out self-references.
 getReferencesIncludeSelf :: ReferenceCache -> StorePath -> IO (Maybe PathSet)
-getReferencesIncludeSelf cache path = do
-  getReferencesFromCache cache path >>= \case
+getReferencesIncludeSelf cache spath = do
+  let
+    getCached = do
+      modifyMVar (nprcPathReferences cache) $ \tree -> do
+        case H.lookup spath tree of
+          Just refs -> pure (tree, Just refs)
+          Nothing -> getPathId cache spath >>= \case
+            Nothing -> pure (tree, Nothing)
+            Just pathId -> do
+              conn <- readMVar (nprcConnection cache)
+              let qry = "select refs from Paths where id = ?"
+              query conn qry (Only pathId) >>= \case
+                -- If references have been recorded, parse and return them
+                [Only (Just refs)] -> do
+                  let refTexts = T.words refs
+                  refs <- map HS.fromList $ forM refTexts $ \txt -> do
+                    case parseStorePath txt of
+                      Right path -> pure path
+                      Left err -> error $ "When parsing references of path "
+                                       <> spToPath spath <> ": " <> err
+                  pure (H.insert spath refs tree, Just refs)
+                _ -> pure (tree, Nothing)
+
+  getCached >>= \case
     Just refs -> pure $ Just refs
     Nothing -> do
-      log cache $ "no cached reference set for " <> tshow path
-      getRefs cache path >>= \case
+      log cache $ "no cached reference set for " <> tshow spath
+      getReferencesUncached cache spath >>= \case
         Nothing -> pure Nothing
         Just refs -> do
-          addPath cache path
-          recordReferences cache path refs
+          addPath cache spath
+          recordReferences cache spath refs
           pure $ Just refs
 
 -- | Get a store path's references, excluding self-references.
 getReferences :: ReferenceCache -> StorePath -> IO (Maybe PathSet)
 getReferences cache path = do
   map (HS.delete path) <$> getReferencesIncludeSelf cache path
-
--- | Get a store path's references from the cache. Return Nothing if
--- the path isn't recorded in the cache yet. Caches in memory.
-getReferencesFromCache
-  :: ReferenceCache -> StorePath -> IO (Maybe PathSet)
-getReferencesFromCache cache path = do
-  modifyMVar (nprcPathReferences cache) $ \tree -> do
-    case H.lookup path tree of
-      Just refs -> pure (tree, Just refs)
-      Nothing -> getPathId cache path >>= \case
-        Nothing -> pure (tree, Nothing)
-        Just pathId -> do
-          conn <- readMVar (nprcConnection cache)
-          let qry = "select refs from Paths where id = ?"
-          query conn qry (Only pathId) >>= \case
-            -- If references have been recorded, parse and return them
-            [Only (Just refs)] -> do
-              let refTexts = T.words refs
-              refs <- map HS.fromList $ forM refTexts $ \txt -> do
-                case parseStorePath txt of
-                  Right path -> pure path
-                  Left err -> error $ "When parsing references of path "
-                                   <> spToPath path <> ": " <> err
-              pure (H.insert path refs tree, Just refs)
-            _ -> pure (tree, Nothing)
 
 -- | Get a store path's ID. Caches in memory.
 getPathId :: ReferenceCache -> StorePath -> IO (Maybe Int64)
@@ -208,6 +260,31 @@ recordReferences cache path refs = getPathId cache path >>= \case
             execute conn qry (refsText, pathId)
             pure $ H.insert path refs tree
 
+-- | Record a path's deriver.
+recordDeriver :: ReferenceCache -> StorePath -> Maybe StorePath -> IO ()
+recordDeriver cache path mDeriver = getPathId cache path >>= \case
+  Nothing -> error "Can't add deriver, path hasn't been stored"
+  Just pathId -> do
+    modifyMVar_ (nprcPathDerivers cache) $ \derivers -> do
+      let storeDir = nprcStoreDir cache
+          mDeriverTxt = case mDeriver of
+            Just dpath -> spToFull storeDir dpath
+            Nothing -> "unknown-deriver"
+          qry = "update Paths set deriver = ? where id = ?"
+          add = withMVar (nprcConnection cache) $ \conn -> do
+            execute conn qry (mDeriverTxt, pathId)
+            pure $ H.insert path mDeriver derivers
+      case H.lookup path derivers of
+        -- Case 1: we don't have a deriver path (or lack thereof)
+        -- recorded, so update the database and cache
+        Nothing -> add
+        -- Case 2: we have recorded that there's no deriver, but now
+        -- we *do* have a deriver. Update the cache.
+        Just Nothing | isJust mDeriver -> add
+        -- Case 3: we already have a deriver path (or lack thereof)
+        -- recorded, and this doesn't add any new information. Leave
+        -- things unchanged.
+        _ -> pure derivers
 
 -- | Add a store path (if it's not there yet) and get its ID. There are
 -- basically three cases here:
@@ -239,4 +316,5 @@ initializeReferenceCache nprc = do
   withMVar (nprcConnection nprc) $ \conn -> do
     execute_ conn $ fromString $
       "create table if not exists Paths " <>
-      "(id integer primary key, path text unique not null, refs text)"
+      "(id integer primary key, path text unique not null, " <>
+      "refs text, deriver text)"
