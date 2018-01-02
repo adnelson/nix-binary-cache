@@ -2,19 +2,20 @@
 module Nix.StorePath where
 
 import ClassyPrelude hiding (try)
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as T
-import Text.Regex.PCRE.Heavy (scan, re)
-import System.Process (readCreateProcess, shell)
-import System.FilePath (takeFileName, takeDirectory, isAbsolute)
-import System.Environment (getEnv)
+import Data.Aeson (ToJSON, FromJSON)
+import Data.HashSet (HashSet)
 import Servant (MimeUnrender(..), OctetStream)
 import Servant.HTML.Lucid (HTML)
-import Data.HashSet (HashSet)
+import System.Environment (getEnv)
+import System.FilePath (takeFileName, takeDirectory, isAbsolute)
+import System.Process (readCreateProcess, shell)
+import Text.Regex.PCRE.Heavy (scan, re)
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
 
 -- | The nix store directory.
 newtype NixStoreDir = NixStoreDir FilePath
-  deriving (Show, Eq, Generic, Hashable, IsString)
+  deriving (Show, Eq, Generic, Hashable, IsString, ToJSON, FromJSON)
 
 -- | The 32-character prefix of an object in the nix store.
 newtype StorePrefix = StorePrefix Text

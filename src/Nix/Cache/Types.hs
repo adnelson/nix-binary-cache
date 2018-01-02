@@ -12,6 +12,7 @@ import Codec.Compression.GZip (compress, decompress)
 
 import Data.KVMap
 import Nix.Cache.Common
+import Nix.StorePath (NixStoreDir(NixStoreDir))
 
 -- | Represents binary data compressed with gzip.
 data GZipped
@@ -30,7 +31,7 @@ instance MimeRender OctetStream t => MimeRender GZipped t where
 -- | Information about a nix binary cache. This information is served
 -- on the /nix-cache-info route.
 data NixCacheInfo = NixCacheInfo {
-  storeDir :: FilePath,
+  storeDir :: NixStoreDir,
   -- ^ On-disk location of the nix store.
   wantMassQuery :: Bool,
   -- ^ Not sure what this does.
@@ -45,7 +46,7 @@ instance FromKVMap NixCacheInfo where
   fromKVMap (KVMap kvm) = case lookup "StoreDir" kvm of
     Nothing -> Left "No StoreDir key defined."
     Just sdir -> return $ NixCacheInfo {
-      storeDir = T.unpack sdir,
+      storeDir = NixStoreDir $ T.unpack sdir,
       wantMassQuery = lookup "WantMassQuery" kvm == Just "1",
       priority = lookup "Priority" kvm >>= readMay
       }

@@ -19,7 +19,7 @@ import System.Exit (ExitCode(..))
 import System.FilePath (takeDirectory)
 import System.Environment (lookupEnv)
 
-import Nix.Cache.Common
+import Nix.Cache.Common hiding (log)
 import Nix.Cache.Client.Misc
 import Nix.Bin (NixBinDir(..), getNixBinDir)
 import Nix.StorePath (NixStoreDir(..), PathTree, PathSet, StorePath, spToText)
@@ -47,28 +47,36 @@ getPathCacheLocation = lookupEnv "CLIENT_SQLITE_CACHE" >>= \case
 
 -- | Path reference cache, backed by sqlite
 data ReferenceCache = ReferenceCache {
+  -- | Location of the nix store.
   nprcStoreDir :: NixStoreDir,
-  -- ^ Location of the nix store.
+  -- | Connection to the local nix database (optional).
   nprcLocalNixDbConnection :: Maybe Connection,
-  -- ^ Connection to the local nix database (optional).
+  -- | Location on disk for nix binaries.
   nprcBinDir :: NixBinDir,
-  -- ^ Location on disk for nix binaries.
+  -- | Location of the cache SQLite database.
   nprcCacheLocation :: FilePath,
-  -- ^ Location of the cache SQLite database.
-  nprcConnection :: MVar Connection,
-  -- ^ Database connection for the local cache. Syncronized in MVar to
+  -- | Database connection for the local cache. Syncronized in MVar to
   -- allow lastrowid to be deterministic.
-  nprcPathIdCache :: MVar (HashMap StorePath Int64),
-  -- ^ Map store paths to their database row ID, so that we don't have to
+  nprcConnection :: MVar Connection,
+  -- | Map store paths to their database row ID, so that we don't have to
   -- look them up all the time.
-  nprcPathReferences :: MVar PathTree
-  -- ^ Computed store path dependency tree.
+  nprcPathIdCache :: MVar (HashMap StorePath Int64),
+  -- | Computed store path dependency tree.
+  nprcPathReferences :: MVar PathTree,
+  -- | Logging function.
+  nprcLogger :: Maybe (Text -> IO ())
   }
+
+log :: ReferenceCache -> Text -> IO ()
+log cache msg = case nprcLogger cache of
+  Nothing -> pure ()
+  Just logger -> logger msg
 
 -- | Attempt to connect to the local SQLite nix database. If the
 -- connection fails, or it doesn't have a ValidPaths table, return Nothing.
 attemptLocalNixConnection :: FilePath -> IO (Maybe Connection)
 attemptLocalNixConnection dbpath = do
+  putStrLn $ "Attempting local nix DB connection on DB path " <> tshow dbpath
   conn <- open dbpath
   let test = query_ conn "select count(*) from ValidPaths" :: IO [Only Int]
   (Just conn <$ test) `catch` \(err::SomeException) -> do
@@ -84,6 +92,7 @@ newReferenceCache = do
   nprcConnection <- newMVar =<< open nprcCacheLocation
   nprcPathIdCache <- newMVar mempty
   nprcPathReferences <- newMVar mempty
+  let nprcLogger = pure putStrLn
   pure ReferenceCache {..}
 
 -- | Get the references of an object by asking either a nix command or the DB.
@@ -97,7 +106,9 @@ getRefs cache spath = case nprcLocalNixDbConnection cache of
     -- Ensure it's in the nix DB by getting its ID
     nixPathId <- do
       let qry = "select id from ValidPaths where path = ?"
-      query conn qry (Only $ spToText spath) >>= \case
+      let row = (Only $ spToFull (nprcStoreDir cache) spath)
+      log cache $ "Running query " <> tshow qry <> " with path " <> tshow row
+      query conn qry row >>= \case
         [Only pid] -> pure (pid :: Int64)
         _ -> error $ "Path " <> show spath <> " not stored in the nix DB"
 
@@ -150,11 +161,13 @@ getReferencesIncludeSelf cache path = do
   getReferencesFromCache cache path >>= \case
     Just refs -> pure refs
     Nothing -> do
+      log cache $ "no cached reference set for " <> tshow path
       refs <- getRefs cache path
       addPath cache path
       recordReferences cache path refs
       pure refs
 
+-- | Get a store path's references, excluding self-references.
 getReferences :: ReferenceCache -> StorePath -> IO PathSet
 getReferences cache path = do
   allrefs <- getReferencesIncludeSelf cache path

@@ -38,14 +38,14 @@ import Nix.Bin
 -------------------------------------------------------------------------------
 
 -- | Define the client by pattern matching.
-nixCacheInfo :: ClientM NixCacheInfo
-narInfo :: NarInfoReq -> ClientM NarInfo
-nar :: NarRequest -> ClientM Nar
+fetchNixCacheInfo :: ClientM NixCacheInfo
+fetchNarInfo :: NarInfoReq -> ClientM NarInfo
+fetchNar :: NarRequest -> ClientM Nar
 queryPaths :: Vector FilePath -> ClientM (HashMap FilePath Bool)
 sendNarExport :: NarExport -> ClientM StorePath
-nixCacheInfo
-  :<|> narInfo
-  :<|> nar
+fetchNixCacheInfo
+  :<|> fetchNarInfo
+  :<|> fetchNar
   :<|> queryPaths
   :<|> sendNarExport = client (Proxy :: Proxy NixCacheAPI)
 
@@ -88,6 +88,9 @@ data NixClientError
   = PathFailedToSend StorePath ServantError
   | PathFailedToFetch StorePath ServantError
   | PathFailedToGetNarInfo StorePath ServantError
+  | FailedToReadNixCacheInfo ServantError
+  | StoreDirectoryMismatch { remoteStoreDir :: NixStoreDir,
+                             localStoreDir :: NixStoreDir }
   deriving (Show, Eq, Generic)
 
 instance Exception NixClientError
@@ -110,24 +113,27 @@ data NixClientConfig = NixClientConfig {
 
 -- | State for the nix client monad.
 data NixClientState = NixClientState {
-  -- ^ Computed store path dependency tree.
+  -- | Mapping of store paths to asynchronous actions which send those paths.
   ncsSentPaths :: !(HashMap StorePath (Async ()))
-  -- ^ Mapping of store paths to asynchronous actions which send those paths.
   } deriving (Generic)
 
 -- | Object read by the nix client reader.
 data NixClientObj = NixClientObj {
+  -- | Static configuration of the client.
   ncoConfig :: NixClientConfig,
-  -- ^ Static configuration of the client.
+  -- | Mutable state of the client.
   ncoState :: MVar NixClientState,
-  -- ^ Mutable state of the client.
+  -- | Starts out as Nothing and becomes Just Nothing if valid, and
+  -- Just (Just err) if there's an error.
+  ncoValidatedStoreDirectory :: MVar (Maybe (Maybe NixClientError)),
+  -- | HTTP connection manager client uses to connect.
   ncoManager :: Manager,
-  -- ^ HTTP connection manager client uses to connect.
-  ncoReferenceCache :: ReferenceCache,
-  -- ^ Database connection for the local cache. Syncronized in MVar to
+  -- | Database connection for the local cache. Syncronized in MVar to
   -- allow lastrowid to be deterministic
+  ncoReferenceCache :: ReferenceCache,
+  -- | Syncronizes logs of the client so they don't overlap.
   ncoLogMutex :: MVar (),
-  -- ^ Syncronizes logs of the client so they don't overlap.
+  -- | Limits the number of concurrent client operations.
   ncoSemaphore :: QSem
   }
 
@@ -153,11 +159,14 @@ runNixClientWithConfig :: NixClientConfig -> NixClient a -> IO a
 runNixClientWithConfig cfg action = do
   semaphore <- newQSem (nccMaxWorkers cfg)
   manager <- mkManager cfg
+  validatedStoreDirectory <- newMVar Nothing
   let state = NixClientState mempty
   stateMVar <- newMVar state
   logMVar <- newMVar ()
   cache <- newReferenceCache
-  let obj = NixClientObj cfg stateMVar manager cache logMVar semaphore
+  initializeReferenceCache cache
+  let obj = NixClientObj cfg stateMVar validatedStoreDirectory
+                         manager cache logMVar semaphore
   -- Perform the action and then update the cache.
   result <- runReaderT (action) obj
   pure result
@@ -252,11 +261,41 @@ clientRequest req = clientRequestEither req >>= \case
 
 -- | Perform a request with the servant client in the NixClient monad.
 clientRequestEither :: ClientM a -> NixClient (Either ServantError a)
-clientRequestEither req = do
+clientRequestEither req = validateStoreDirectory >> do
   config <- ncoConfig <$> ask
   manager <- ncoManager <$> ask
   let env = ClientEnv manager (nccCacheUrl config)
   liftIO $ runClientM req env
+
+-- | Validate that the remote cache has the same store directory as
+-- the client. This is only performed once, and it's lazy: it only
+-- happens if we need to communicate with the remote server (which isn't
+-- always the case)
+validateStoreDirectory :: NixClient ()
+validateStoreDirectory = do
+  mv <- ncoValidatedStoreDirectory <$> ask
+  readMVar mv >>= \case
+    -- Already been validated, just return
+    Just Nothing -> pure ()
+    -- Encountered an error before, throw that error
+    Just (Just err) -> throw err
+    -- Hasn't been done yet, validate and fill the mvar
+    Nothing -> do
+      modifyMVar_ mv $ \_ -> do
+        ncDebug "Validating remote nix store directory..."
+        config <- ncoConfig <$> ask
+        manager <- ncoManager <$> ask
+        let env = ClientEnv manager (nccCacheUrl config)
+        liftIO (runClientM fetchNixCacheInfo env) >>= \case
+          Left err -> pure (Just $ Just $ FailedToReadNixCacheInfo err)
+          Right info -> do
+            let remoteStoreDir = storeDir info
+            localStoreDir <- nccStoreDir . ncoConfig <$> ask
+            case remoteStoreDir == localStoreDir of
+              True -> pure (Just Nothing)
+              False -> pure (Just $ Just StoreDirectoryMismatch {..})
+      -- Now that we checked, rerun the validate command
+      validateStoreDirectory
 
 -------------------------------------------------------------------------------
 -- * Nix client actions
@@ -279,8 +318,7 @@ inSemaphore action = bracket getSem releaseSem (\_ -> action) where
 getNarInfo :: StorePath -> NixClient (Maybe NarInfo)
 getNarInfo path = inSemaphore $ do
   ncDebug $ "Requesting narinfo for " <> tshow path
-  let req = NarInfoReq (spPrefix path)
-  clientRequestEither (narInfo req) >>= \case
+  clientRequestEither (fetchNarInfo $ NarInfoReq (spPrefix path)) >>= \case
     Right info -> pure $ Just info
     Left err -> case errorIs404 err of
       True -> pure Nothing
@@ -417,8 +455,8 @@ mytest = do
   hSetBuffering stderr LineBuffering
 
   cfg' <- loadClientConfig
-  let cfg = cfg' { nccCacheUrl = BaseUrl Http "10.0.249.215" 5000 ""
-                 --  nccLogLevel = LOG_DEBUG
+  let cfg = cfg' { nccCacheUrl = BaseUrl Https "green-slashnix-repo.n-s.us" 443 ""
+                 , nccLogLevel = LOG_DEBUG
                  }
   _ <- (P.!! 5) <$> getNixStorePaths 10
   paths <- getNixStorePaths 20
