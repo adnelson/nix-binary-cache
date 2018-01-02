@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 -- | Functions for parsing a nix derivation.
 module Nix.Derivation.Parser where
 
@@ -5,10 +6,12 @@ import ClassyPrelude hiding (try, readFile)
 import Prelude (readFile)
 import Text.Parsec
 import qualified Data.HashMap.Strict as H
+import qualified Data.Text as T
 
 import Nix.StorePath
 import Nix.FileHash
 import Nix.Derivation.Types
+import Nix.Bin (NixCmdReturn(nixCmd))
 
 -- | Parsec parser type.
 type Parser a = Parsec [Char] () a
@@ -122,6 +125,49 @@ parseDerivString s = case parse derivationParser "derivation" s of
   Left err -> Left $ show err
   Right deriv -> Right deriv
 
+-- | Parse a derivation text.
+parseDerivText :: Text -> Either String Derivation
+parseDerivText s = case parse derivationParser "derivation" (unpack s) of
+  Left err -> Left $ show err
+  Right deriv -> Right deriv
+
 -- | Parse a derivation file. Assumes the file exists.
 parseDerivFile :: FilePath -> IO (Either String Derivation)
 parseDerivFile p = parseDerivString <$> readFile p
+
+-- | Parse a derivation file. Assumes the file exists and parses correctly.
+parseDerivFromPath :: NixStoreDir -> StorePath -> IO Derivation
+parseDerivFromPath sdir spath = parseDerivFile (spToFull sdir spath) >>= \case
+  Left err -> error err
+  Right deriv -> pure deriv
+
+-- | Parse a derivation file from a storepath, using the NIX_STORE variable.
+parseDerivFromPath' :: StorePath -> IO Derivation
+parseDerivFromPath' p = getNixStoreDir >>= flip parseDerivFromPath p
+
+-- | Parse a derivation file given its store prefix.
+parseDerivFromPrefix :: StorePrefix -> IO Derivation
+parseDerivFromPrefix (StorePrefix prefix) = do
+  parseDerivFromPath' =<< findSpByPrefix prefix
+
+parseDerivAndOutputs :: Text -> IO (Either String DerivationAndOutputs)
+parseDerivAndOutputs txt = case T.split (=='!') (T.strip txt) of
+  [path] -> parseDerivFile (unpack path) >>= \case
+    Right deriv -> pure $ Right $ DerivationAndOutputs deriv Nothing
+    Left err -> pure $ Left err
+  [path, ""] -> parseDerivFile (unpack path) >>= \case
+    Right deriv -> pure $ Right $ DerivationAndOutputs deriv Nothing
+    Left err -> pure $ Left err
+  [path, outputs] -> do
+    let names = OutputName <$> T.split (==',') outputs
+    parseDerivFile (unpack path) >>= \case
+      Right deriv -> pure $ Right $ DerivationAndOutputs deriv (Just names)
+      Left err -> pure $ Left err
+  _ -> pure $ Left $ "Couldn't parse derivation/outputs indication " <> show txt
+
+
+instance NixCmdReturn DerivationAndOutputs where
+  nixCmd nixBin cmd args input = do
+    nixCmd nixBin cmd args input >>= parseDerivAndOutputs >>= \case
+      Left err -> error err
+      Right res -> pure res

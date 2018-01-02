@@ -201,9 +201,6 @@ instance BINARY_CLASS NarExport where
 
     pure NarExport {..}
 
-instance MimeRender OctetStream Nar where
-  mimeRender _ = toLazyByteString . execPut . put
-
 runGet_ :: BINARY_CLASS a => BL.ByteString -> Either String a
 #ifdef USE_CEREAL
 runGet_ = runGetLazy get
@@ -213,11 +210,17 @@ runGet_ bs = case runGetOrFail get bs of
   Left (_, _, err) -> Left err
 #endif
 
+runPut_ :: BINARY_CLASS a => a -> BL.ByteString
+runPut_ = toLazyByteString . execPut . put
+
+instance MimeRender OctetStream Nar where
+  mimeRender _ = runPut_
+
 instance MimeUnrender OctetStream Nar where
   mimeUnrender _ bs = runGet_ bs
 
 instance MimeRender OctetStream NarExport where
-  mimeRender _ = toLazyByteString . execPut . put
+  mimeRender _ = runPut_
 
 instance MimeUnrender OctetStream NarExport where
   mimeUnrender _ bs = runGet_ bs

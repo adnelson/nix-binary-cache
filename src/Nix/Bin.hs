@@ -5,15 +5,14 @@ import ClassyPrelude
 import System.Environment (setEnv, lookupEnv)
 import System.Exit (ExitCode(..))
 import qualified System.Process.ByteString as PB
+import qualified System.Process.ByteString.Lazy as PBL
 import qualified System.Process.Text as PT
 import System.FilePath (takeDirectory)
 import System.Directory (doesFileExist)
 import System.Process (readCreateProcess, shell)
 import qualified Data.ByteString.Char8 as B8
+import qualified Data.ByteString.Lazy.Char8 as BL8
 import qualified Data.Text as T
-
-import Nix.StorePath (StorePath, FullStorePath, NixStoreDir,
-                      ioParseFullStorePath)
 
 -- | Path to the directory containing nix binaries.
 newtype NixBinDir = NixBinDir {unpackNixBinDir::FilePath}
@@ -35,47 +34,42 @@ getNixBinDir = lookupEnv "NIX_BIN_DIR" >>= \case
 
 -- | Class for things which can be returned from nix commands.
 class NixCmdReturn t where
-  nixCmd :: NixBinDir -> String -> [String] -> IO t
+  nixCmd :: NixBinDir -> String -> [String] -> BL8.ByteString -> IO t
 
 -- | Run a nix command, using the `getNixBinDir` function
-nixCmd' :: NixCmdReturn t => String -> [String] -> IO t
-nixCmd' cmd args = getNixBinDir >>= \d -> nixCmd d cmd args
+nixCmd' :: NixCmdReturn t => String -> [String] -> BL8.ByteString -> IO t
+nixCmd' cmd args input = getNixBinDir >>= \d -> nixCmd d cmd args input
 
 instance NixCmdReturn ByteString where
-  nixCmd (NixBinDir nixBin) cmd args = do
+  nixCmd (NixBinDir nixBin) cmd args input = do
     let executable = (nixBin </> ("nix-" <> cmd))
-    PB.readProcessWithExitCode executable args "" >>= \case
+    PB.readProcessWithExitCode executable args (toStrict input) >>= \case
       (ExitSuccess, stdout, _) -> pure stdout
       (ExitFailure code, _, stderr) -> error $ unlines $ [
           cmd' <> " failed with status " <> show code
           , "STDERR:", B8.unpack stderr]
         where cmd' = "nix-" <> cmd <> " " <> intercalate " " args
 
-instance NixCmdReturn Text where
-  nixCmd (NixBinDir nixBin) cmd args = do
+instance NixCmdReturn BL8.ByteString where
+  nixCmd (NixBinDir nixBin) cmd args input = do
     let executable = (nixBin </> ("nix-" <> cmd))
-    PT.readProcessWithExitCode executable args "" >>= \case
+    PBL.readProcessWithExitCode executable args input >>= \case
       (ExitSuccess, stdout, _) -> pure stdout
       (ExitFailure code, _, stderr) -> error $ unlines $ [
           cmd' <> " failed with status " <> show code
-          , "STDERR:", unpack stderr]
+          , "STDERR:", BL8.unpack stderr]
+        where cmd' = "nix-" <> cmd <> " " <> intercalate " " args
+
+instance NixCmdReturn Text where
+  nixCmd (NixBinDir nixBin) cmd args input = do
+    let executable = (nixBin </> ("nix-" <> cmd))
+    PB.readProcessWithExitCode executable args (toStrict input) >>= \case
+      (ExitSuccess, stdout, _) -> pure (decodeUtf8 stdout)
+      (ExitFailure code, _, stderr) -> error $ unlines $ [
+          cmd' <> " failed with status " <> show code
+          , "STDERR:", B8.unpack stderr]
         where cmd' = "nix-" <> cmd <> " " <> intercalate " " args
 
 instance NixCmdReturn () where
-  nixCmd nixBin cmd args = (nixCmd nixBin cmd args :: IO Text) >> pure ()
-
-instance NixCmdReturn FullStorePath where
-  nixCmd nixBin cmd args = do
-    rawPath <- nixCmd nixBin cmd args
-    ioParseFullStorePath rawPath
-
-instance NixCmdReturn StorePath where
-  nixCmd nixBin cmd args = do
-    (_ :: NixStoreDir, spath) <- nixCmd nixBin cmd args
-    pure spath
-
-instance NixCmdReturn [StorePath] where
-  nixCmd nixBin cmd args = do
-    rawPaths <- nixCmd nixBin cmd args
-    forM (T.lines rawPaths) $ \line ->
-      snd <$> ioParseFullStorePath line
+  nixCmd nixBin cmd args input =
+    (nixCmd nixBin cmd args input :: IO Text) >> pure ()

@@ -1,12 +1,9 @@
 -- | Cache store paths and their references
 module Nix.ReferenceCache (
   ReferenceCache(..),
-  newReferenceCache,
-  initializeReferenceCache,
-  getReferences,
-  getReferencesIncludeSelf,
-  recordReferences,
-  computeClosure
+  newReferenceCache, initializeReferenceCache,
+  getReferences, getReferencesIncludeSelf, computeClosure,
+  addPath, recordReferences
   ) where
 
 import Database.SQLite.Simple (Connection, Query, Only(..), lastInsertRowId)
@@ -14,14 +11,11 @@ import Database.SQLite.Simple (open, execute_, execute, query, query_)
 import qualified Data.HashMap.Strict as H
 import qualified Data.HashSet as HS
 import qualified Data.Text as T
-import System.Process.Text (readProcessWithExitCode)
-import System.Exit (ExitCode(..))
 import System.FilePath (takeDirectory)
 import System.Environment (lookupEnv)
 
 import Nix.Cache.Common hiding (log)
-import Nix.Cache.Client.Misc
-import Nix.Bin (NixBinDir(..), getNixBinDir)
+import Nix.Bin (NixBinDir(..), getNixBinDir, nixCmd)
 import Nix.StorePath (NixStoreDir(..), PathTree, PathSet, StorePath, spToText)
 import Nix.StorePath (getNixStoreDir, spToFull, parseStorePath, spToPath)
 import Nix.StorePath (ioParseFullStorePath)
@@ -97,54 +91,37 @@ newReferenceCache = do
 
 -- | Get the references of an object by asking either a nix command or the DB.
 -- This information is cached by the caller of this function.
-getRefs :: ReferenceCache -> StorePath -> IO PathSet
+getRefs :: ReferenceCache -> StorePath -> IO (Maybe PathSet)
 getRefs cache spath = case nprcLocalNixDbConnection cache of
   -- We can't access the DB directly. Use the CLI.
   Nothing -> getRefsFromNixCommand cache spath
   -- Pull the references directly out of the database.
   Just conn -> do
     -- Ensure it's in the nix DB by getting its ID
-    nixPathId <- do
-      let qry = "select id from ValidPaths where path = ?"
-      let row = (Only $ spToFull (nprcStoreDir cache) spath)
-      log cache $ "Running query " <> tshow qry <> " with path " <> tshow row
-      query conn qry row >>= \case
-        [Only pid] -> pure (pid :: Int64)
-        _ -> error $ "Path " <> show spath <> " not stored in the nix DB"
+    let qry = "select id from ValidPaths where path = ?"
+    let row = (Only $ spToFull (nprcStoreDir cache) spath)
+    log cache $ "Running query " <> tshow qry <> " with path " <> tshow row
+    query conn qry row >>= \case
+      [Only (nixPathId :: Int64)] -> do
+        refs <- query conn getPathsQuery (Only nixPathId)
+        map (Just . HS.fromList) $
+          map snd <$> mapM ioParseFullStorePath (map fromOnly refs)
+      _ -> pure Nothing
 
-    refs <- query conn getPathsQuery (Only nixPathId)
-    map HS.fromList $ map snd <$> mapM ioParseFullStorePath (map fromOnly refs)
 
 -- | Get references of a path by querying the nix CLI.
-getRefsFromNixCommand :: ReferenceCache -> StorePath -> IO PathSet
+getRefsFromNixCommand :: ReferenceCache -> StorePath -> IO (Maybe PathSet)
 getRefsFromNixCommand cache spath = do
-  let nixStoreCmd = unpackNixBinDir (nprcBinDir cache) </> "nix-store"
-      storeDir = nprcStoreDir cache
-  let args = ["--query", "--references", spToFull storeDir spath]
-  readProcessWithExitCode nixStoreCmd args "" >>= \case
-    (ExitSuccess, stdout, _) -> map HS.fromList $ do
-      map snd <$> mapM ioParseFullStorePath (splitWS stdout)
-    (ExitFailure code, _, stderr) -> error msg
-      where cmd = nixStoreCmd <> " " <> intercalate " " args
-            msg' = cmd <> " failed with " <> show code
-            msg = msg' <> unpack (if T.strip stderr == "" then ""
-                                  else "\nSTDERR:\n" <> stderr)
+  let storeDir = nprcStoreDir cache
+      args = ["--query", "--references", spToFull storeDir spath]
+  map (Just . HS.fromList) (nixCmd (nprcBinDir cache) "store" args "")
+    `catch` \(_::SomeException) -> pure Nothing
 
 -- | Get the full runtime path dependency closure of a store path.
 computeClosure :: ReferenceCache -> StorePath -> IO [StorePath]
 computeClosure cache path = do
-  let nixStoreCmd = unpackNixBinDir (nprcBinDir cache) </> "nix-store"
-      storeDir = nprcStoreDir cache
-      args = ["-qR", spToFull storeDir path]
-  readProcessWithExitCode nixStoreCmd args "" >>= \case
-    (ExitSuccess, stdout, _) -> do
-      map snd <$> mapM ioParseFullStorePath (splitWS stdout)
-    (ExitFailure code, _, stderr) -> do
-      error msg
-      where cmd = nixStoreCmd <> " " <> intercalate " " args
-            msg' = cmd <> " failed with " <> show code
-            msg = msg' <> unpack (if T.strip stderr == "" then ""
-                                  else "\nSTDERR:\n" <> stderr)
+  let storeDir = nprcStoreDir cache
+  nixCmd (nprcBinDir cache) "store" ["-qR", spToFull storeDir path] ""
 
 -- | Query which will return all of the references of a path.
 getPathsQuery :: Query
@@ -156,22 +133,23 @@ getPathsQuery = fromString $ concat [
 
 -- | Get the references of a path, checking and updating the cache.
 -- Doesn't filter out self-references.
-getReferencesIncludeSelf :: ReferenceCache -> StorePath -> IO PathSet
+getReferencesIncludeSelf :: ReferenceCache -> StorePath -> IO (Maybe PathSet)
 getReferencesIncludeSelf cache path = do
   getReferencesFromCache cache path >>= \case
-    Just refs -> pure refs
+    Just refs -> pure $ Just refs
     Nothing -> do
       log cache $ "no cached reference set for " <> tshow path
-      refs <- getRefs cache path
-      addPath cache path
-      recordReferences cache path refs
-      pure refs
+      getRefs cache path >>= \case
+        Nothing -> pure Nothing
+        Just refs -> do
+          addPath cache path
+          recordReferences cache path refs
+          pure $ Just refs
 
 -- | Get a store path's references, excluding self-references.
-getReferences :: ReferenceCache -> StorePath -> IO PathSet
+getReferences :: ReferenceCache -> StorePath -> IO (Maybe PathSet)
 getReferences cache path = do
-  allrefs <- getReferencesIncludeSelf cache path
-  pure $ HS.delete path allrefs
+  map (HS.delete path) <$> getReferencesIncludeSelf cache path
 
 -- | Get a store path's references from the cache. Return Nothing if
 -- the path isn't recorded in the cache yet. Caches in memory.

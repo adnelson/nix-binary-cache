@@ -13,6 +13,8 @@ import Text.Regex.PCRE.Heavy (scan, re)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 
+import Nix.Bin (NixCmdReturn(nixCmd))
+
 -- | The nix store directory.
 newtype NixStoreDir = NixStoreDir FilePath
   deriving (Show, Eq, Generic, Hashable, IsString, ToJSON, FromJSON)
@@ -23,7 +25,10 @@ newtype StorePrefix = StorePrefix Text
 
 -- | The hash and name of an object in the nix store.
 data StorePath = StorePath {spPrefix :: StorePrefix, spName :: Text}
-  deriving (Show, Eq, Generic)
+  deriving (Eq, Generic)
+
+instance Show StorePath where
+  show (StorePath (StorePrefix prefix) name) = unpack (prefix <> "-" <> name)
 
 instance Hashable StorePath
 
@@ -53,7 +58,8 @@ parseStorePath txt =
 -- | Parse a store path from text. Probably not super efficient but oh well.
 parseFullStorePath :: Text -> Either String FullStorePath
 parseFullStorePath (T.unpack -> p) = case (takeDirectory p, takeFileName p) of
-  (d, _) | not (isAbsolute d) -> Left "store path must be absolute"
+  (d, _) | not (isAbsolute d) -> do
+    Left ("store path must be absolute: " <> show d <> " (" <> p <> ")")
   (_, "") -> Left ("basename of store path " <> show p <> " is empty")
   (storeDir, base) -> do
     storePath <- parseStorePath (T.pack base)
@@ -67,9 +73,11 @@ ioParseStorePath txt = liftIO $ case parseStorePath txt of
 
 -- | Parse a full store path in the IO monad.
 ioParseFullStorePath :: MonadIO io => Text -> io FullStorePath
-ioParseFullStorePath txt = liftIO $ case parseFullStorePath txt of
-  Left err -> error err
-  Right result -> return result
+ioParseFullStorePath txt = do
+  putStrLn "FART!"
+  liftIO $ case parseFullStorePath txt of
+    Left err -> error err
+    Right result -> return result
 
 -- | Given a nix store dir and a store path, produce a full file path.
 spToFull :: NixStoreDir -> StorePath -> FilePath
@@ -130,3 +138,19 @@ instance MimeUnrender OctetStream StorePath where
 
 instance MimeUnrender HTML StorePath where
   mimeUnrender _ = map snd . parseFullStorePath . T.decodeUtf8 . toStrict
+
+instance NixCmdReturn FullStorePath where
+  nixCmd nixBin cmd args input = do
+    rawPath <- nixCmd nixBin cmd args input
+    ioParseFullStorePath rawPath
+
+instance NixCmdReturn StorePath where
+  nixCmd nixBin cmd args input = do
+    (_ :: NixStoreDir, spath) <- nixCmd nixBin cmd args input
+    pure spath
+
+instance NixCmdReturn [StorePath] where
+  nixCmd nixBin cmd args input = do
+    rawPaths <- nixCmd nixBin cmd args input
+    forM (T.lines rawPaths) $ \line ->
+      snd <$> ioParseFullStorePath line
