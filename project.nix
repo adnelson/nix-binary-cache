@@ -1,6 +1,13 @@
 { pkgs, haskellPackages, }:
 
 let
+  nix' = pkgs.nix; /* pkgs.nix.overrideDerivation (d: {
+    doCheck = false;
+    doInstallCheck = false;
+    patchPhase = ''
+      patch -p1 < ${./nix.patch}
+    '';
+  }); */
   pname = "nix-binary-cache";
 
   binaryLibrary = if builtins.getEnv "USE_CEREAL" != ""
@@ -84,7 +91,7 @@ let
   # Derivations needed to use in the nix shell.
   shellRequires = with pkgs; [
     curl
-    nix.out
+    nix'
     less
     nmap
     silver-searcher
