@@ -170,7 +170,7 @@ instance BINARY_CLASS NarExport where
     -- If no signature, put 0, else 1 and then the signature
     case nmSignature of
       Nothing -> put (NarInt 0)
-      Just sig -> put (NarInt 1) *> put (NarString (signatureToBytes sig))
+      Just (Signature sig) -> put (NarInt 1) *> put (NarString sig)
 
     -- The end of the export is eight zeroes
     putByteString $ B.replicate 8 0
@@ -197,10 +197,7 @@ instance BINARY_CLASS NarExport where
     -- Get the signature (optional)
     nmSignature <- get >>= \case
       (0 :: NarInt) -> pure Nothing
-      1 -> do
-        parseSignature <$> getSomeNS >>= \case
-          Right sig -> pure $ Just sig
-          Left err -> fail err
+      1 -> Just . Signature <$> getSomeNS
       n -> fail ("Expected either 0 or 1 before the signature, got " <> show n)
 
     -- Consume the final 8 bytes

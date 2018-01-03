@@ -187,6 +187,7 @@ loadClientConfig = do
   nccSendRetry <- pure 3
   nccFetchRetry <- pure 3
   nccBinDir <- getNixBinDir
+  putStrLn $ "Nix bin dir: " <> tshow nccBinDir
   pure NixClientConfig {..}
 
 -- | Run the nix client monad, given a configuration.
@@ -569,12 +570,12 @@ sendSinglePath spath = go =<< nccSendRetry <$> ncoConfig <$> ask where
                    ncLowDebug $ "Retrying (" <> tshow retries <> ") remaining"
                    go (retries - 1)
 
-getSignatureNC :: StorePath -> NixClient (Maybe ByteString)
+getSignatureNC :: StorePath -> NixClient (Maybe Signature)
 getSignatureNC spath = do
   cache <- ncoReferenceCache <$> ask
   -- TODO make this general
   liftIO (getSignature cache spath "cache.nixos.org-1") >>= \case
-    Just sigBytes -> pure $ Just sigBytes
+    Just sig -> pure $ Just sig
     Nothing -> do
       getNarInfo spath
       liftIO (getSignature cache spath "cache.nixos.org-1")
@@ -586,7 +587,9 @@ getMetadata path = do
   nmStoreDirectory <- nccStoreDir . ncoConfig <$> ask
   nmDeriver <- join <$> liftIO (getDeriver cache path)
   nmReferences <- getReferencesLocally path
-  nmSignature <- map (Signature "cache.nixos.org-1") <$> getSignatureNC path
+  nmSignature <- getSignatureNC path
+  putStrLn $ "Signature: " <> tshow nmSignature
+
   pure NarMetadata {nmStorePath = path, ..}
 
 -- | Given a Nar and the path it corresponds to, build an export.

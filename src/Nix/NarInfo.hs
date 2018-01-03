@@ -10,7 +10,7 @@ import Servant (MimeUnrender(..), ToHttpApiData(..), OctetStream)
 
 import Nix.StorePath (StorePrefix(StorePrefix))
 import Nix.FileHash (FileHash(..), fileHashFromText)
-import Nix.Nar.Types (Signature, parseSignature)
+import Nix.Nar.Types (SignaturePair, parseSignaturePair)
 
 -- | Nix archive info. This returns metadata about an object that the
 -- binary cache can serve to a client.
@@ -24,7 +24,7 @@ data NarInfo = NarInfo {
   compression :: NarCompressionType, -- ^ How this NAR is compressed.
   references :: [FilePath], -- ^ Other store objects this references.
   deriver :: Maybe FilePath, -- ^ The derivation file for this object.
-  sig :: Maybe Signature -- Possible signature of the cache.
+  sig :: Maybe SignaturePair -- Possible signature of the cache.
   } deriving (Show, Eq, Generic)
 
 instance FromKVMap NarInfo where
@@ -59,7 +59,7 @@ instance FromKVMap NarInfo where
         deriver = Nothing
     sig <- case lookup "Sig" kvm of
              Nothing -> pure Nothing
-             Just sigTxt -> Just <$> parseSignature (encodeUtf8 sigTxt)
+             Just sigTxt -> Just <$> parseSignaturePair (encodeUtf8 sigTxt)
     return $ NarInfo storePath narHash narSize fileSize fileHash
                narReq compression references deriver sig
 

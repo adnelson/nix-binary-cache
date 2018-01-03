@@ -17,7 +17,7 @@ import System.Environment (lookupEnv)
 
 import Nix.Cache.Common hiding (log)
 import Nix.Bin (NixBinDir(..), getNixBinDir, nixCmd)
-import Nix.Nar.Types (Signature(..), KeyName(..))
+import Nix.Nar.Types (SignaturePair(..), Signature(..), KeyName(..))
 import Nix.StorePath (NixStoreDir(..), PathTree, PathSet, StorePath, spToText)
 import Nix.StorePath (getNixStoreDir, spToFull, parseStorePath, spToPath)
 import Nix.StorePath (ioParseStorePath)
@@ -62,7 +62,7 @@ data ReferenceCache = ReferenceCache {
   -- | Computed store path derivers. Not all paths have known derivers.
   nprcPathDerivers :: MVar (HashMap StorePath (Maybe StorePath)),
   -- | Signatures. Each path can have up to one signature per public key.
-  nprcPathSignatures :: MVar (HashMap StorePath (HashMap KeyName ByteString)),
+  nprcPathSignatures :: MVar (HashMap StorePath (HashMap KeyName Signature)),
   -- | Logging function.
   nprcLogger :: Maybe (Text -> IO ())
   }
@@ -289,7 +289,7 @@ recordDeriver cache path mDeriver = do
       -- things unchanged.
       _ -> pure derivers
 
-getSignature :: ReferenceCache -> StorePath -> KeyName -> IO (Maybe ByteString)
+getSignature :: ReferenceCache -> StorePath -> KeyName -> IO (Maybe Signature)
 getSignature cache spath key@(KeyName name) = do
   pathId <- addPath cache spath
   let
@@ -299,7 +299,7 @@ getSignature cache spath key@(KeyName name) = do
             "select signature from Signatures inner join Paths " <>
             "on path_id = id where id = ? and key_name = ?"
       query conn (fromString sql) (pathId, name) >>= \case
-        [Only signature] -> pure $ Just signature
+        [Only signature] -> pure $ Just (Signature signature)
         _ -> pure Nothing
   modifyMVar (nprcPathSignatures cache) $ \sigs -> do
     case H.lookup spath sigs of
@@ -321,16 +321,15 @@ getSignature cache spath key@(KeyName name) = do
           pure (H.insert spath (H.singleton key sigBytes) sigs, Just sigBytes)
 
 
-recordSignature :: ReferenceCache -> StorePath -> Signature -> IO ()
-recordSignature cache spath (Signature key sig) = do
+recordSignature :: ReferenceCache -> StorePath -> SignaturePair -> IO ()
+recordSignature cache spath (SignaturePair key sig) = do
   pathId <- addPath cache spath
   let
     recordInDB = withMVar (nprcConnection cache) $ \conn -> do
-      let KeyName keyName = key
       let qry = fromString $
             "insert or ignore into Signatures " <>
             "(path_id, key_name, signature) values (?, ?, ?)"
-      execute conn qry (pathId, keyName, sig)
+      execute conn qry (pathId, unKeyName key, unSignature sig)
 
   modifyMVar_ (nprcPathSignatures cache) $ \signatures -> do
     case H.lookup spath signatures of

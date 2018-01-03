@@ -6,7 +6,8 @@ import ClassyPrelude
 import Nix.Nar.Types (Nar, NarExport(neMetadata), NarMetadata(nmStorePath))
 import Nix.Nar.Serialization (runGet_, runPut_)
 import Nix.Bin (NixBinDir, nixCmd)
-import Nix.StorePath (StorePath, NixStoreDir, spToFull)
+import Nix.StorePath (StorePath, NixStoreDir, spToFull, spToPath)
+import qualified Data.ByteString.Lazy as BL
 
 -- | Ask nix for an archive of a store object.
 getNar :: NixBinDir -> NixStoreDir -> StorePath -> IO Nar
@@ -30,6 +31,10 @@ getNarExport nixBin nsdir spath = do
 importNarExport :: NixBinDir -> NarExport -> IO ()
 importNarExport nixBin export = do
   let path = nmStorePath $ neMetadata export
-  nixCmd nixBin "store" ["--import"] (runPut_ export)
+      bytes = runPut_ export
+  nixCmd nixBin "store" ["--import"] bytes
     `catch` \(e :: SomeException) -> do
-                error $ "When importing " <> show path <> ": " <> show e
+      let p = "/tmp/" <> spToPath path
+      putStrLn $ "writing bytes to " <> tshow p
+      BL.writeFile p bytes
+      error $ "When importing " <> show path <> ": " <> show e

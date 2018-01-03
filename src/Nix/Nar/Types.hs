@@ -3,6 +3,7 @@ module Nix.Nar.Types where
 
 import ClassyPrelude hiding (take, try, Builder)
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Base64 as B64
 
 import Nix.StorePath (NixStoreDir, StorePath, PathSet)
 
@@ -28,20 +29,27 @@ data NarMetadata = NarMetadata {
   nmSignature :: Maybe Signature
   } deriving (Show, Eq, Generic)
 
-newtype KeyName = KeyName Text
+newtype KeyName = KeyName {unKeyName::Text}
   deriving (Show, Eq, Generic, Hashable, IsString)
 
-data Signature = Signature !KeyName !ByteString
+newtype Signature = Signature {unSignature::ByteString}
+  deriving (Show, Eq, Generic, Hashable, IsString)
+
+data SignaturePair = SignaturePair !KeyName !Signature
   deriving (Show, Eq, Generic)
 
-signatureToBytes :: Signature -> ByteString
-signatureToBytes (Signature (KeyName key) sig) = encodeUtf8 key <> ":" <> sig
+-- Encode a keyname/signature pair
+signatureToBytes :: SignaturePair -> ByteString
+signatureToBytes (SignaturePair (KeyName key) (Signature sig)) = do
+  encodeUtf8 key <> ":" <> sig
 
-parseSignature :: ByteString -> Either String Signature
-parseSignature bs = do
+parseSignaturePair :: ByteString -> Either String SignaturePair
+parseSignaturePair bs = do
   let sep = fromIntegral $ fromEnum ':'
   case B.split sep bs of
-    [key, bytes] -> Right (Signature (KeyName $ decodeUtf8 key) bytes)
+    [key, bytes] -> do
+      decoded <- B64.decode bytes
+      Right (SignaturePair (KeyName $ decodeUtf8 key) (Signature decoded))
     _ -> Left $ "Couldn't parse signature " <> show bs
 
 -- | An exported nix archive
