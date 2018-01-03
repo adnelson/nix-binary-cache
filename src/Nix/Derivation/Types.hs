@@ -33,6 +33,16 @@ data Derivation = Derivation {
 newtype OutputName = OutputName {outputName::Text}
   deriving (Show, Eq, Ord, Hashable, IsString)
 
+-- | What is returned by nix-instantiate; the path to the derivation,
+-- plus optionally some output names.
+data DerivationAndOutputs
+  = DerivationAndOutputs !Derivation !(Maybe [OutputName])
+
+newtype NoSuchOutput = NoSuchOutput OutputName
+  deriving (Show, Eq, Generic)
+
+instance Exception NoSuchOutput
+
 -- | Given a derivation and an output name, return the path that the
 -- output will correspond to.
 --
@@ -42,6 +52,8 @@ newtype OutputName = OutputName {outputName::Text}
 -- This function given the output name will produce the corresponding
 -- path that is expected to be built.
 --
--- If the derivation doesn't provide the given output, an error is returned.
-lookupOutput :: Derivation -> OutputName -> Maybe StorePath
-lookupOutput Derivation{..} oname = fst <$> H.lookup oname derivOutputs
+-- If the derivation doesn't provide the given output, Nothing is returned.
+lookupOutput :: Derivation -> OutputName -> Either NoSuchOutput StorePath
+lookupOutput Derivation{..} oname = case H.lookup oname derivOutputs of
+  Nothing -> Left $ NoSuchOutput oname
+  Just (path, _) -> Right path

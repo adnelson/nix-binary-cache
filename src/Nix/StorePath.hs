@@ -13,17 +13,22 @@ import Text.Regex.PCRE.Heavy (scan, re)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 
+import Nix.Bin (NixCmdReturn(nixCmd))
+
 -- | The nix store directory.
 newtype NixStoreDir = NixStoreDir FilePath
   deriving (Show, Eq, Generic, Hashable, IsString, ToJSON, FromJSON)
 
 -- | The 32-character prefix of an object in the nix store.
 newtype StorePrefix = StorePrefix Text
-  deriving (Show, Eq, Generic, Hashable, IsString)
+  deriving (Show, Eq, Ord, Generic, Hashable, IsString)
 
 -- | The hash and name of an object in the nix store.
 data StorePath = StorePath {spPrefix :: StorePrefix, spName :: Text}
-  deriving (Show, Eq, Generic)
+  deriving (Eq, Ord, Generic)
+
+instance Show StorePath where
+  show (StorePath (StorePrefix prefix) name) = unpack (prefix <> "-" <> name)
 
 instance Hashable StorePath
 
@@ -50,18 +55,31 @@ parseStorePath txt =
     [(_, [StorePrefix -> hash, name])] -> Right $ StorePath hash name
     _ -> Left $ show txt <> " does not appear to be a store basepath"
 
+-- | Parse a store path. The source can be either a full (absolute)
+-- path or a store (base) path.
+permissiveParseStorePath :: Text -> Either String StorePath
+permissiveParseStorePath txt = do
+  case (parseStorePath txt, parseFullStorePath txt) of
+    (Right spath, _) -> pure spath
+    (_, Right (_, spath)) -> pure spath
+    (Left err1, Left err2) -> Left $ concat [
+      "Not a base store path (", show err1, ") and not an absolute ",
+      "store path (", show err2, ")"
+      ]
+
 -- | Parse a store path from text. Probably not super efficient but oh well.
 parseFullStorePath :: Text -> Either String FullStorePath
 parseFullStorePath (T.unpack -> p) = case (takeDirectory p, takeFileName p) of
-  (d, _) | not (isAbsolute d) -> Left "store path must be absolute"
+  (d, _) | not (isAbsolute d) -> do
+    Left ("store path must be absolute: " <> show d <> " (" <> p <> ")")
   (_, "") -> Left ("basename of store path " <> show p <> " is empty")
   (storeDir, base) -> do
     storePath <- parseStorePath (T.pack base)
     pure (NixStoreDir storeDir, storePath)
 
--- | Parse a StorePath in the IO monad.
+-- | Parse a StorePath in the IO monad. The input can be absolute or base.
 ioParseStorePath :: MonadIO io => Text -> io StorePath
-ioParseStorePath txt = liftIO $ case parseStorePath txt of
+ioParseStorePath txt = liftIO $ case permissiveParseStorePath txt of
   Left err -> error err
   Right sp -> return sp
 
@@ -130,3 +148,18 @@ instance MimeUnrender OctetStream StorePath where
 
 instance MimeUnrender HTML StorePath where
   mimeUnrender _ = map snd . parseFullStorePath . T.decodeUtf8 . toStrict
+
+instance NixCmdReturn FullStorePath where
+  nixCmd nixBin cmd args input = do
+    rawPath <- nixCmd nixBin cmd args input
+    ioParseFullStorePath rawPath
+
+instance NixCmdReturn StorePath where
+  nixCmd nixBin cmd args input = do
+    ioParseStorePath =<< nixCmd nixBin cmd args input
+
+instance NixCmdReturn [StorePath] where
+  nixCmd nixBin cmd args input = do
+    rawPaths <- nixCmd nixBin cmd args input
+    forM (T.lines rawPaths) $ \line ->
+      ioParseStorePath line

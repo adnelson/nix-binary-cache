@@ -16,7 +16,10 @@ import Data.Binary.Get (runGetOrFail)
 import Data.Binary.Put (Put, putByteString, putInt64le, execPut)
 #endif
 import Data.ByteString.Builder (toLazyByteString)
+import qualified Codec.Compression.Lzma as Lzma
+import qualified Codec.Compression.GZip as GZip
 import qualified Data.HashMap.Strict as H
+import qualified Data.HashSet as HS
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL
@@ -144,29 +147,30 @@ instance BINARY_CLASS Nar where
   put (Nar elem) = putNS "nix-archive-1" >> put elem
 
 instance BINARY_CLASS NarExport where
-  put (NarExport {..}) = do
+  put export = do
+    let NarMetadata {..} = neMetadata export
     -- Write the NAR surrounded by constants
     putByteString magicExportStartConstant
-    put neNar
+    put (neNar export)
     putByteString magicExportMetadataConstant
 
     -- Write the store path
-    put (NarString $ B8.pack $ spToFull neStoreDirectory neStorePath)
+    put (NarString $ B8.pack $ spToFull nmStoreDirectory nmStorePath)
 
     -- Write the references
-    put (NarInt $ length neReferences)
-    forM neReferences $ \sp -> do
-      put (NarString $ B8.pack $ spToFull neStoreDirectory sp)
+    put (NarInt $ length nmReferences)
+    forM (sort $ HS.toList nmReferences) $ \sp -> do
+      put (NarString $ B8.pack $ spToFull nmStoreDirectory sp)
 
     -- If there's a deriver, write it. Otherwise an empty string
-    put $ case neDeriver of
+    put $ case nmDeriver of
       Nothing -> ""
-      Just sp -> NarString $ B8.pack $ spToFull neStoreDirectory sp
+      Just sp -> NarString $ B8.pack $ spToFull nmStoreDirectory sp
 
     -- If no signature, put 0, else 1 and then the signature
-    case neSignature of
+    case nmSignature of
       Nothing -> put (NarInt 0)
-      Just sig -> put (NarInt 1) *> put (NarString sig)
+      Just (Signature sig) -> put (NarInt 1) *> put (NarString sig)
 
     -- The end of the export is eight zeroes
     putByteString $ B.replicate 8 0
@@ -178,31 +182,51 @@ instance BINARY_CLASS NarExport where
     getThisByteString magicExportMetadataConstant
 
     -- Get the store path of the exported object
-    (neStoreDirectory, neStorePath) <- getStorePath
+    (nmStoreDirectory, nmStorePath) <- getStorePath
     -- Get the references
-    neReferences <- do
+    nmReferences <- HS.fromList <$> do
       NarInt numReferences <- get
       forM [0 .. (numReferences - 1)] $ \_ -> do
         snd <$> getStorePath
     -- Get the deriver (optional)
-    neDeriver <- getSomeNS >>= \case
+    nmDeriver <- getSomeNS >>= \case
       "" -> pure Nothing
       raw -> case parseFullStorePath (decodeUtf8 raw) of
         Left err -> fail err
         Right (_, path) -> pure $ Just path
     -- Get the signature (optional)
-    neSignature <- get >>= \case
+    nmSignature <- get >>= \case
       (0 :: NarInt) -> pure Nothing
-      1 -> Just <$> getSomeNS
+      1 -> Just . Signature <$> getSomeNS
       n -> fail ("Expected either 0 or 1 before the signature, got " <> show n)
 
     -- Consume the final 8 bytes
     getByteString 8
 
-    pure NarExport {..}
+    pure $ NarExport neNar (NarMetadata {..})
 
-instance MimeRender OctetStream Nar where
-  mimeRender _ = toLazyByteString . execPut . put
+-- Byte sequence that all xzips start with
+xzMagicHeader :: BL.ByteString
+xzMagicHeader = BL.pack [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]
+
+-- Byte sequence that all gzips start with
+gzMagicHeader :: BL.ByteString
+gzMagicHeader = BL.pack [0x1f, 0x8b, 0x08]
+
+data Uncompressed
+  = FromGZip BL.ByteString
+  | FromXZip BL.ByteString
+  | Wasn'tCompressed BL.ByteString
+  deriving (Show, Eq, Generic)
+
+-- | Detect if the bytestring is compressed, and decompress it if so.
+decompressIfCompressed :: BL.ByteString -> BL.ByteString
+decompressIfCompressed bytes =
+  if BL.isPrefixOf xzMagicHeader bytes
+  then Lzma.decompress bytes
+  else if BL.isPrefixOf gzMagicHeader bytes
+  then GZip.decompress bytes
+  else bytes
 
 runGet_ :: BINARY_CLASS a => BL.ByteString -> Either String a
 #ifdef USE_CEREAL
@@ -213,11 +237,17 @@ runGet_ bs = case runGetOrFail get bs of
   Left (_, _, err) -> Left err
 #endif
 
+runPut_ :: BINARY_CLASS a => a -> BL.ByteString
+runPut_ = toLazyByteString . execPut . put
+
+instance MimeRender OctetStream Nar where
+  mimeRender _ = runPut_
+
 instance MimeUnrender OctetStream Nar where
-  mimeUnrender _ bs = runGet_ bs
+  mimeUnrender _ bs = runGet_ $ decompressIfCompressed bs
 
 instance MimeRender OctetStream NarExport where
-  mimeRender _ = toLazyByteString . execPut . put
+  mimeRender _ = runPut_
 
 instance MimeUnrender OctetStream NarExport where
-  mimeUnrender _ bs = runGet_ bs
+  mimeUnrender _ bs = runGet_ $ decompressIfCompressed bs

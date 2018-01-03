@@ -16,20 +16,6 @@ import Nix.Derivation.Parser
 import Nix.StorePath
 import Nix.FileHash
 
--- | Parse a derivation file. Assumes the file exists and parses correctly.
-parseDerivFromPath :: NixStoreDir -> StorePath -> IO Derivation
-parseDerivFromPath sdir spath = parseDerivFile (spToFull sdir spath) >>= \case
-  Left err -> fail err
-  Right deriv -> pure deriv
-
--- | Parse a derivation file from a storepath, using the NIX_STORE variable.
-parseDerivFromPath' :: StorePath -> IO Derivation
-parseDerivFromPath' p = getNixStoreDir >>= flip parseDerivFromPath p
-
--- | Parse a derivation file given its store prefix.
-parseDerivFromPrefix :: Text -> IO Derivation
-parseDerivFromPrefix prefix = parseDerivFromPath' =<< findSpByPrefix prefix
-
 -- | Given a derivation, retrieve all of the derivation paths it
 -- requires to build. Note this is not the full closure, because it
 -- does not recur on other derivations. Also note that this does not
@@ -40,7 +26,10 @@ derivInputs :: NixStoreDir -> Derivation -> IO PathSet
 derivInputs storeDir Derivation{..} = HS.fromList . concat <$> do
   forM (H.toList derivInputDerivations) $ \(dpath, outNames) -> do
     deriv <- parseDerivFromPath storeDir dpath
-    pure $ catMaybes $ lookupOutput deriv <$> outNames
+    pure $ catMaybes $ flip map outNames $ \name -> do
+      case lookupOutput deriv name of
+        Left _ -> Nothing
+        Right path -> Just path
 
 derivGetEnv :: Text -> Derivation -> Maybe Text
 derivGetEnv key = H.lookup key . derivEnv
