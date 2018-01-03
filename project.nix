@@ -28,6 +28,7 @@ let
     "http-types"
     "lifted-async"
     "lifted-base"
+    "lzma"
     "lucid"
     "mtl"
     "parsec"

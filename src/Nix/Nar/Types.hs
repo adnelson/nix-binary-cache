@@ -25,8 +25,24 @@ data NarMetadata = NarMetadata {
   nmStorePath :: StorePath,
   nmReferences :: PathSet,
   nmDeriver :: Maybe StorePath,
-  nmSignature :: Maybe ByteString
+  nmSignature :: Maybe Signature
   } deriving (Show, Eq, Generic)
+
+newtype KeyName = KeyName Text
+  deriving (Show, Eq, Generic, Hashable, IsString)
+
+data Signature = Signature !KeyName !ByteString
+  deriving (Show, Eq, Generic)
+
+signatureToBytes :: Signature -> ByteString
+signatureToBytes (Signature (KeyName key) sig) = encodeUtf8 key <> ":" <> sig
+
+parseSignature :: ByteString -> Either String Signature
+parseSignature bs = do
+  let sep = fromIntegral $ fromEnum ':'
+  case B.split sep bs of
+    [key, bytes] -> Right (Signature (KeyName $ decodeUtf8 key) bytes)
+    _ -> Left $ "Couldn't parse signature " <> show bs
 
 -- | An exported nix archive
 data NarExport = NarExport {neNar :: Nar, neMetadata :: NarMetadata}

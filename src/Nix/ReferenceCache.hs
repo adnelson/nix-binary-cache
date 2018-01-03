@@ -3,7 +3,8 @@ module Nix.ReferenceCache (
   ReferenceCache(..),
   newReferenceCache, initializeReferenceCache,
   getReferences, getReferencesIncludeSelf, computeClosure,
-  addPath, recordReferences, getDeriver, recordDeriver
+  addPath, recordReferences, getDeriver, recordDeriver,
+  getSignature, recordSignature
   ) where
 
 import Database.SQLite.Simple (Connection, Query, Only(..), lastInsertRowId)
@@ -16,6 +17,7 @@ import System.Environment (lookupEnv)
 
 import Nix.Cache.Common hiding (log)
 import Nix.Bin (NixBinDir(..), getNixBinDir, nixCmd)
+import Nix.Nar.Types (Signature(..), KeyName(..))
 import Nix.StorePath (NixStoreDir(..), PathTree, PathSet, StorePath, spToText)
 import Nix.StorePath (getNixStoreDir, spToFull, parseStorePath, spToPath)
 import Nix.StorePath (ioParseStorePath)
@@ -59,6 +61,8 @@ data ReferenceCache = ReferenceCache {
   nprcPathReferences :: MVar PathTree,
   -- | Computed store path derivers. Not all paths have known derivers.
   nprcPathDerivers :: MVar (HashMap StorePath (Maybe StorePath)),
+  -- | Signatures. Each path can have up to one signature per public key.
+  nprcPathSignatures :: MVar (HashMap StorePath (HashMap KeyName ByteString)),
   -- | Logging function.
   nprcLogger :: Maybe (Text -> IO ())
   }
@@ -89,6 +93,7 @@ newReferenceCache = do
   nprcPathIdCache <- newMVar mempty
   nprcPathReferences <- newMVar mempty
   nprcPathDerivers <- newMVar mempty
+  nprcPathSignatures <- newMVar mempty
   let nprcLogger = pure putStrLn
   pure ReferenceCache {..}
 
@@ -143,6 +148,7 @@ getDeriver cache spath = do
           [Only (Just deriverTxt)] -> Just . Just <$> ioParseStorePath deriverTxt
           [Only Nothing] -> pure (Just Nothing)
           _ -> pure Nothing
+
     getFromCache = do
       modifyMVar (nprcPathDerivers cache) $ \derivers -> do
         case H.lookup spath derivers of
@@ -219,7 +225,6 @@ getReferencesIncludeSelf cache spath = do
       getReferencesUncached cache spath >>= \case
         Nothing -> pure Nothing
         Just refs -> do
-          addPath cache spath
           recordReferences cache spath refs
           pure $ Just refs
 
@@ -245,46 +250,102 @@ getPathId cache path = do
 
 -- | Store the references of a path. Caches in memory and in the DB.
 recordReferences :: ReferenceCache -> StorePath -> PathSet -> IO ()
-recordReferences cache path refs = getPathId cache path >>= \case
-  Nothing -> error "Can't add references, path hasn't been stored"
-  Just pathId -> do
-    modifyMVar_ (nprcPathReferences cache) $ \tree -> do
-      case H.lookup path tree of
-        Just refs' | refs == refs' -> pure tree
-        Just _ -> error $ "Inconsistent reference lists for path " <> show path
-        Nothing -> do
-          -- First insert them into the database, then add to the cache
-          withMVar (nprcConnection cache) $ \conn -> do
-            let refsText = intercalate " " $ map spToText $ HS.toList refs
-                qry = "update Paths set refs = ? where id = ?"
-            execute conn qry (refsText, pathId)
-            pure $ H.insert path refs tree
+recordReferences cache path refs = do
+  pathId <- addPath cache path
+  modifyMVar_ (nprcPathReferences cache) $ \tree -> do
+    case H.lookup path tree of
+      Just refs' | refs == refs' -> pure tree
+      Just _ -> error $ "Inconsistent reference lists for path " <> show path
+      Nothing -> do
+        -- First insert them into the database, then add to the cache
+        withMVar (nprcConnection cache) $ \conn -> do
+          let refsText = intercalate " " $ map spToText $ HS.toList refs
+              qry = "update Paths set refs = ? where id = ?"
+          execute conn qry (refsText, pathId)
+          pure $ H.insert path refs tree
 
 -- | Record a path's deriver.
 recordDeriver :: ReferenceCache -> StorePath -> Maybe StorePath -> IO ()
-recordDeriver cache path mDeriver = getPathId cache path >>= \case
-  Nothing -> error "Can't add deriver, path hasn't been stored"
-  Just pathId -> do
-    modifyMVar_ (nprcPathDerivers cache) $ \derivers -> do
-      let storeDir = nprcStoreDir cache
-          mDeriverTxt = case mDeriver of
-            Just dpath -> spToFull storeDir dpath
-            Nothing -> "unknown-deriver"
-          qry = "update Paths set deriver = ? where id = ?"
-          add = withMVar (nprcConnection cache) $ \conn -> do
-            execute conn qry (mDeriverTxt, pathId)
-            pure $ H.insert path mDeriver derivers
-      case H.lookup path derivers of
-        -- Case 1: we don't have a deriver path (or lack thereof)
-        -- recorded, so update the database and cache
-        Nothing -> add
-        -- Case 2: we have recorded that there's no deriver, but now
-        -- we *do* have a deriver. Update the cache.
-        Just Nothing | isJust mDeriver -> add
-        -- Case 3: we already have a deriver path (or lack thereof)
-        -- recorded, and this doesn't add any new information. Leave
-        -- things unchanged.
-        _ -> pure derivers
+recordDeriver cache path mDeriver = do
+  pathId <- addPath cache path
+  modifyMVar_ (nprcPathDerivers cache) $ \derivers -> do
+    let storeDir = nprcStoreDir cache
+        mDeriverTxt = case mDeriver of
+          Just dpath -> spToFull storeDir dpath
+          Nothing -> "unknown-deriver"
+        qry = "update Paths set deriver = ? where id = ?"
+        add = withMVar (nprcConnection cache) $ \conn -> do
+          execute conn qry (mDeriverTxt, pathId)
+          pure $ H.insert path mDeriver derivers
+    case H.lookup path derivers of
+      -- Case 1: we don't have a deriver path (or lack thereof)
+      -- recorded, so update the database and cache
+      Nothing -> add
+      -- Case 2: we have recorded that there's no deriver, but now
+      -- we *do* have a deriver. Update the cache.
+      Just Nothing | isJust mDeriver -> add
+      -- Case 3: we already have a deriver path (or lack thereof)
+      -- recorded, and this doesn't add any new information. Leave
+      -- things unchanged.
+      _ -> pure derivers
+
+getSignature :: ReferenceCache -> StorePath -> KeyName -> IO (Maybe ByteString)
+getSignature cache spath key@(KeyName name) = do
+  pathId <- addPath cache spath
+  let
+    readFromDB = do
+      conn <- readMVar (nprcConnection cache)
+      let sql = fromString $
+            "select signature from Signatures inner join Paths " <>
+            "on path_id = id where id = ? and key_name = ?"
+      query conn (fromString sql) (pathId, name) >>= \case
+        [Only signature] -> pure $ Just signature
+        _ -> pure Nothing
+  modifyMVar (nprcPathSignatures cache) $ \sigs -> do
+    case H.lookup spath sigs of
+      Just sigsByKey -> case H.lookup key sigsByKey of
+        -- in the outer map and inner map
+        Just sigBytes -> pure (sigs, Just sigBytes)
+        -- in the outer map but not inner map
+        Nothing -> readFromDB >>= \case
+          -- not in the database: give up
+          Nothing -> pure (sigs, Nothing)
+          -- in the database
+          Just sigBytes -> do
+            let sigsByKey' = H.insert key sigBytes sigsByKey
+            pure (H.insert spath sigsByKey' sigs, Just sigBytes)
+      -- not in the outer map
+      Nothing -> readFromDB >>= \case
+        Nothing -> pure (sigs, Nothing)
+        Just sigBytes -> do
+          pure (H.insert spath (H.singleton key sigBytes) sigs, Just sigBytes)
+
+
+recordSignature :: ReferenceCache -> StorePath -> Signature -> IO ()
+recordSignature cache spath (Signature key sig) = do
+  pathId <- addPath cache spath
+  let
+    recordInDB = withMVar (nprcConnection cache) $ \conn -> do
+      let KeyName keyName = key
+      let qry = fromString $
+            "insert or ignore into Signatures " <>
+            "(path_id, key_name, signature) values (?, ?, ?)"
+      execute conn qry (pathId, keyName, sig)
+
+  modifyMVar_ (nprcPathSignatures cache) $ \signatures -> do
+    case H.lookup spath signatures of
+      Just sigsByKey -> case H.lookup key sigsByKey of
+        Just sig' | sig == sig' -> pure signatures
+        Just sig' | otherwise -> error $ concat [
+          "Conflicting signatures for ", show spath, ": ", show sig',
+          " is stored, but trying to store new signature ", show sig
+          ]
+        Nothing -> do
+          recordInDB
+          pure (H.insert spath (H.insert key sig sigsByKey) signatures)
+      Nothing -> do
+        recordInDB
+        pure (H.insert spath (H.singleton key sig) signatures)
 
 -- | Add a store path (if it's not there yet) and get its ID. There are
 -- basically three cases here:
@@ -318,3 +379,10 @@ initializeReferenceCache nprc = do
       "create table if not exists Paths " <>
       "(id integer primary key, path text unique not null, " <>
       "refs text, deriver text)"
+
+    execute_ conn $ fromString $
+      "create table if not exists Signatures " <>
+      "(path_id integer not null references Paths(id) on delete cascade, " <>
+      "key_name text not null, signature text not null, " <>
+      "constraint one_sig_per_key_per_path unique " <>
+      "(path_id, key_name, signature))"

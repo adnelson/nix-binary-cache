@@ -16,6 +16,8 @@ import Data.Binary.Get (runGetOrFail)
 import Data.Binary.Put (Put, putByteString, putInt64le, execPut)
 #endif
 import Data.ByteString.Builder (toLazyByteString)
+import qualified Codec.Compression.Lzma as Lzma
+import qualified Codec.Compression.GZip as GZip
 import qualified Data.HashMap.Strict as H
 import qualified Data.HashSet as HS
 import qualified Data.ByteString as B
@@ -168,7 +170,7 @@ instance BINARY_CLASS NarExport where
     -- If no signature, put 0, else 1 and then the signature
     case nmSignature of
       Nothing -> put (NarInt 0)
-      Just sig -> put (NarInt 1) *> put (NarString sig)
+      Just sig -> put (NarInt 1) *> put (NarString (signatureToBytes sig))
 
     -- The end of the export is eight zeroes
     putByteString $ B.replicate 8 0
@@ -195,13 +197,39 @@ instance BINARY_CLASS NarExport where
     -- Get the signature (optional)
     nmSignature <- get >>= \case
       (0 :: NarInt) -> pure Nothing
-      1 -> Just <$> getSomeNS
+      1 -> do
+        parseSignature <$> getSomeNS >>= \case
+          Right sig -> pure $ Just sig
+          Left err -> fail err
       n -> fail ("Expected either 0 or 1 before the signature, got " <> show n)
 
     -- Consume the final 8 bytes
     getByteString 8
 
     pure $ NarExport neNar (NarMetadata {..})
+
+-- Byte sequence that all xzips start with
+xzMagicHeader :: BL.ByteString
+xzMagicHeader = BL.pack [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]
+
+-- Byte sequence that all gzips start with
+gzMagicHeader :: BL.ByteString
+gzMagicHeader = BL.pack [0x1f, 0x8b, 0x08]
+
+data Uncompressed
+  = FromGZip BL.ByteString
+  | FromXZip BL.ByteString
+  | Wasn'tCompressed BL.ByteString
+  deriving (Show, Eq, Generic)
+
+-- | Detect if the bytestring is compressed, and decompress it if so.
+decompressIfCompressed :: BL.ByteString -> BL.ByteString
+decompressIfCompressed bytes =
+  if BL.isPrefixOf xzMagicHeader bytes
+  then Lzma.decompress bytes
+  else if BL.isPrefixOf gzMagicHeader bytes
+  then GZip.decompress bytes
+  else bytes
 
 runGet_ :: BINARY_CLASS a => BL.ByteString -> Either String a
 #ifdef USE_CEREAL
@@ -219,10 +247,10 @@ instance MimeRender OctetStream Nar where
   mimeRender _ = runPut_
 
 instance MimeUnrender OctetStream Nar where
-  mimeUnrender _ bs = runGet_ bs
+  mimeUnrender _ bs = runGet_ $ decompressIfCompressed bs
 
 instance MimeRender OctetStream NarExport where
   mimeRender _ = runPut_
 
 instance MimeUnrender OctetStream NarExport where
-  mimeUnrender _ bs = runGet_ bs
+  mimeUnrender _ bs = runGet_ $ decompressIfCompressed bs

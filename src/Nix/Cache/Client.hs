@@ -32,12 +32,14 @@ import Nix.Cache.Client.Misc (getNixStorePaths)
 import Nix.Cache.Logger
 import Nix.Cache.Types (NixCacheInfo(storeDir))
 import Nix.Derivation -- (Derivation(..), parseDeriv
-import Nix.Nar (Nar, NarExport(..), NarMetadata(..))
+import Nix.Nar (Nar, NarExport(..), NarMetadata(..), Signature(..))
 import Nix.Nar (getNarExport, importNarExport)
 import Nix.NarInfo (NarInfo(references, narReq), NarInfoReq(..), NarRequest)
-import Nix.ReferenceCache (ReferenceCache, addPath, getDeriver)
+import qualified Nix.NarInfo as NarInfo
+import Nix.ReferenceCache (ReferenceCache, getDeriver)
 import Nix.ReferenceCache (computeClosure, recordReferences, getReferences)
 import Nix.ReferenceCache (newReferenceCache, initializeReferenceCache)
+import Nix.ReferenceCache (recordSignature, getSignature)
 import Nix.StorePath (NixStoreDir, StorePath(spPrefix), PathSet)
 import Nix.StorePath (getNixStoreDir, abbrevSP)
 import Nix.StorePath (ioParseFullStorePath, ioParseStorePath, spToFull)
@@ -345,7 +347,11 @@ getNarInfo :: StorePath -> NixClient (Maybe NarInfo)
 getNarInfo path = inSemaphore $ do
   ncDebug $ "Requesting narinfo for " <> tshow path
   clientRequestEither (fetchNarInfo $ NarInfoReq (spPrefix path)) >>= \case
-    Right info -> pure $ Just info
+    Right info -> do
+      forM_ (NarInfo.sig info) $ \sig -> do
+        cache <- ncoReferenceCache <$> ask
+        liftIO $ recordSignature cache path sig
+      pure $ Just info
     Left err -> case errorIs404 err of
       True -> pure Nothing
       False -> throw $ PathFailedToGetNarInfo path err
@@ -415,9 +421,7 @@ getReferencesFallBackToServer spath = do
         let refs = references info
         refPaths <- map HS.fromList $ forM refs $ \path -> do
           ioParseStorePath (pack path)
-        liftIO $ do
-          addPath cache spath
-          recordReferences cache spath refPaths
+        liftIO $ recordReferences cache spath refPaths
         pure refPaths
       Nothing -> throw $ PathNotOnServer spath
 
@@ -565,16 +569,25 @@ sendSinglePath spath = go =<< nccSendRetry <$> ncoConfig <$> ask where
                    ncLowDebug $ "Retrying (" <> tshow retries <> ") remaining"
                    go (retries - 1)
 
+getSignatureNC :: StorePath -> NixClient (Maybe ByteString)
+getSignatureNC spath = do
+  cache <- ncoReferenceCache <$> ask
+  -- TODO make this general
+  liftIO (getSignature cache spath "cache.nixos.org-1") >>= \case
+    Just sigBytes -> pure $ Just sigBytes
+    Nothing -> do
+      getNarInfo spath
+      liftIO (getSignature cache spath "cache.nixos.org-1")
+
 -- | Get the NAR metadata for a store path.
 getMetadata :: StorePath -> NixClient NarMetadata
-getMetadata nmStorePath = do
+getMetadata path = do
   cache <- ncoReferenceCache <$> ask
   nmStoreDirectory <- nccStoreDir . ncoConfig <$> ask
-  nmDeriver <- join <$> liftIO (getDeriver cache nmStorePath)
-  nmReferences <- getReferencesLocally nmStorePath
-  -- TODO
-  nmSignature <- pure Nothing
-  pure NarMetadata {..}
+  nmDeriver <- join <$> liftIO (getDeriver cache path)
+  nmReferences <- getReferencesLocally path
+  nmSignature <- map (Signature "cache.nixos.org-1") <$> getSignatureNC path
+  pure NarMetadata {nmStorePath = path, ..}
 
 -- | Given a Nar and the path it corresponds to, build an export.
 makeNarExport :: StorePath -> Nar -> NixClient NarExport
